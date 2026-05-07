@@ -1,4 +1,16 @@
+<div align="center">
+
 # Engram Retention
+
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20041183.svg)](https://doi.org/10.5281/zenodo.20041183)
+[![License: CC BY 4.0](https://img.shields.io/badge/License-CC--BY--4.0-lightgrey.svg)](LICENSE)
+[![CI](https://github.com/XXY-CH/engram-retention/actions/workflows/ci.yml/badge.svg)](https://github.com/XXY-CH/engram-retention/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](pyproject.toml)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.1%2B-ee4c2c.svg)](requirements.txt)
+
+**A proof-aligned PyTorch scaffold for budgeted long-context memory.**
+
+</div>
 
 Reference PyTorch code and proof notes for a Dense-first long-context language
 modeling research scaffold that combines:
@@ -19,6 +31,55 @@ attention.
 This is an early research codebase. The implementation is intended for
 architecture experiments, synthetic diagnostics, and proof-aligned ablations.
 Interfaces may change while the core assumptions are refined.
+
+## Architecture
+
+Engram Retention is organized as a small language-modeling stack plus a proof
+trail. The implementation keeps four mechanisms separate so each one can be
+ablated and audited:
+
+```text
+input tokens
+    |
+    v
+token + position embeddings
+    |
+    v
+Dense RetNet-Engram layers
+    |
+    |-- RetentionLayer
+    |     compact recurrent/parallel sequence mixing with fixed per-head decay
+    |
+    |-- Dense FFN
+    |     phase-1 channel mixing baseline; MoE remains a future extension
+    |
+    |-- HashedNgramEngram
+    |     deterministic N-gram lookup injected as a gated residual branch
+    |
+    |-- BlockAttentionResidual
+    |     depth-axis reuse over earlier layer/block states
+    |
+    |-- MilestoneRetentionGate + MilestoneSnapshotReadout
+    |     optional selected-token preservation and bounded snapshot readout
+    |
+    v
+RMSNorm + tied output projection
+    |
+    v
+next-token logits and diagnostic metrics
+```
+
+The research stack around the model is:
+
+```text
+src/            implementation surface
+tests/          behavior locks for layers, model wiring, and training smoke paths
+experiments/    synthetic tasks, ablations, and reproducibility configs
+analysis/       plotting scripts for curated figures
+docs/           methodology, proof trail, assumption audits, and progress notes
+papers/         human-written notes over local paper readings
+references/     BibTeX and paper manifest, without committing mirrored PDFs
+```
 
 ## Installation
 
@@ -45,16 +106,13 @@ python experiments/train_synthetic.py --task needle --variants ours,retnet,trans
 ## Repository Layout
 
 ```text
-src/layers/                 Core retention, Engram, AttnRes, and snapshot layers
-src/models/                 RetNet-Engram model and Transformer baseline
-src/training/               Small training utilities
-experiments/train_synthetic.py
-                            Synthetic diagnostic runner
-experiments/configs/        Reproducible experiment configurations
+analysis/                   Figure-generation scripts and derived analysis
+docs/                       Research methodology, architecture notes, proofs, progress
+experiments/                Synthetic diagnostics and experiment configs
+papers/                     Reading notes for RetNet, Engram, and attention residuals
+references/                 BibTeX and manifest for the external paper corpus
+src/                        PyTorch implementation
 tests/                      Unit and integration smoke tests
-docs/proofs/                Proof trail and assumption audits
-docs/progress/              Research progress notes
-references/bibtex/          Bibliography for the paper/proof stack
 ```
 
 PDF papers, local virtual environments, generated plots, temporary extraction
