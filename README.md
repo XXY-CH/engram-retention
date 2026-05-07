@@ -98,4 +98,4 @@ Zenodo DOI: `10.5281/zenodo.20041183`.
 
 ## License
 
-Apache-2.0. See `LICENSE`.
+Creative Commons Attribution 4.0 International (`CC-BY-4.0`). See `LICENSE`.
