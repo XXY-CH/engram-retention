@@ -93,8 +93,8 @@ without overstating the architecture's scope.
 
 ## Citation
 
-If this repository helps your work, cite it through `CITATION.cff`. A formal
-paper citation can replace the software citation once a manuscript is released.
+If this repository helps your work, cite it through `CITATION.cff` or the
+Zenodo DOI: `10.5281/zenodo.20041183`.
 
 ## License
 

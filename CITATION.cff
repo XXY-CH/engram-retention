@@ -5,6 +5,7 @@ authors:
   - family-names: "Xie"
     given-names: "Xingyu"
 year: 2026
+doi: "10.5281/zenodo.20041183"
 license: "Apache-2.0"
 repository-code: "https://github.com/XXY-CH/retnet-engram"
 abstract: "PyTorch research scaffold for RetNet-style retention, Block Attention Residuals, hashed Engram lookup, and bounded milestone snapshot readout."
