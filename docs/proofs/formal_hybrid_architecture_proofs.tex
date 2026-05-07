@@ -1,0 +1,795 @@
+\documentclass[11pt]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath, amsthm, amssymb, mathrsfs, bm, mathtools}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{microtype}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{float}
+\usepackage[hidelinks]{hyperref}
+
+\geometry{a4paper, margin=1in}
+\setlist[itemize]{leftmargin=1.5em}
+\setlist[enumerate]{leftmargin=1.7em}
+
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{assumption}[theorem]{Assumption}
+\newtheorem{remark}[theorem]{Remark}
+
+\newcommand{\Ret}{\mathcal{R}}
+\newcommand{\Eng}{\mathcal{E}}
+\newcommand{\Att}{\mathcal{A}}
+\newcommand{\FFN}{\mathcal{F}}
+\newcommand{\Cache}{\mathcal{C}}
+\newcommand{\Oh}{\mathcal{O}}
+\newcommand{\RMS}{\mathrm{RMSNorm}}
+\newcommand{\softmax}{\mathrm{softmax}}
+\newcommand{\sigmoid}{\mathrm{sigmoid}}
+\newcommand{\clip}{\mathrm{clip}}
+\newcommand{\Tr}{\mathrm{Tr}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Prob}{\mathbb{P}}
+\DeclarePairedDelimiter{\norm}{\lVert}{\rVert}
+
+\title{A Conditional Small-State Memory Architecture for Efficient Long-Context Reasoning:\\[0.25em]
+\Large RetNet Streaming, Distance-Biased Attention Residuals, and Engram Lookup}
+\author{Xingyu Xie \\ \href{mailto:cachoidxx@gmail.com}{cachoidxx@gmail.com}}
+\date{May 2026 -- Revised Draft v3}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Long-context language models must balance two competing requirements: inexpensive processing of ordinary tokens and reliable preservation of a small set of tokens that later become decision-critical. Transformer decoding addresses preservation through a Key-Value cache whose memory scales with context length, whereas recurrent and linear sequence models reduce decoding state but do not, by compression alone, ensure precise recovery of rare or high-entropy information. This paper studies a conditional small-state memory architecture for this trade-off. The model uses a RetNet-style recurrent/chunkwise recurrent backbone for default sequence processing, a budgeted milestone snapshot cache for selected long-range premises, distance-biased Block Attention Residuals for depth-wise reuse of intermediate representations, and Engram-style N-gram lookup for frequent local patterns. The paper formalizes the inference budget, states snapshot retrieval as a set of sufficient margin conditions, revises the Engram collision analysis to separate idealized concentration from short-range dependent NLP collisions, and gives implementation-level guardrails in algorithmic form. The resulting claim is deliberately conditional: when task-relevant information is sparse, a capped $\Oh(K)$ snapshot path, an $\Oh(B)$ depth path, and approximately $\Oh(1)$ lookup probes may improve the memory--accuracy frontier relative to a purely recurrent backbone, without asserting a universal replacement for full KV-cache attention.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{Introduction}
+
+Long-context modeling contains two distinct subproblems. The model must update its state over many tokens at low marginal cost, and it must also preserve selected assumptions, definitions, entities, or intermediate conclusions with enough fidelity to support later decisions. Standard attention provides direct access to past token representations through a Key-Value (KV) cache, but the decoding memory grows with the context length $N$. Retentive and other recurrent sequence models offer a compact streaming state, but their compression objective is not equivalent to exact long-range storage.
+
+This paper formulates the design problem as \emph{selective budget allocation}. The default path should be a low-cost streaming backbone. A small number of pivotal states should be copied into a bounded memory that is read directly at decoding time. Frequent local patterns should be served by static conditional memory when a deterministic lookup is sufficient. Intermediate reasoning states should be routed across depth by content-dependent residual aggregation rather than by uniform residual accumulation.
+
+The objective is a resource-rational architecture: additional memory is introduced only for information whose future utility is expected to exceed the cost of retaining it explicitly.
+
+\subsection{Design hypothesis and budget contract}
+
+Let $N$ denote the sequence length, $L$ the number of layers, $d$ the model width, $K$ the maximum number of active snapshot items, $B$ the number of AttnRes block summaries, and $H$ the number of Engram hash probes. The proposed inference contract is
+\begin{equation}
+\label{eq:budget-contract}
+\text{memory per decoding stream}
+= \Oh(S_{\Ret}) + \Oh(Kd) + \Oh(Bd) + \Oh(Hd),
+\end{equation}
+where $S_{\Ret}$ is the RetNet recurrent state size and is independent of $N$ for a fixed model configuration. If $K$, $B$, and $H$ are fixed or capped by policy, the marginal memory does not grow linearly with the context length. If $K$ is allowed to grow with $N$, the claim must be restated as $\Oh(K(N)d)$ rather than as bounded memory. This explicit distinction is central to the revised paper.
+
+
+\begin{proposition}[Budgeted inference invariant]
+\label{prop:budget-invariant}
+Assume that the RetNet recurrent state size $S_{\Ret}$ is fixed by the model configuration, the snapshot policy returns at most $K_{\max}$ active items, Block AttnRes stores at most $B_{\max}$ depth summaries, and Engram performs at most $H_{\max}$ table probes per token. Then the non-backbone incremental decoding memory is
+\begin{equation}
+\Oh(S_{\Ret})+\Oh(K_{\max}d)+\Oh(B_{\max}d)+\Oh(H_{\max}d),
+\end{equation}
+and the non-backbone per-token read cost is
+\begin{equation}
+\Oh(K_{\max}d)+\Oh(B_{\max}d)+\Oh(H_{\max}d),
+\end{equation}
+up to constant factors for heads and projections. These terms are independent of $N$ only when $K_{\max},B_{\max},H_{\max}$ are independent of $N$.
+\end{proposition}
+
+\begin{proof}
+The cache invariant $|\Cache_t|\leq K_{\max}$ follows directly from the definition of the budget operator in Equation~\eqref{eq:budget-update}. Reading the cache by dot-product attention over $K_{\max}$ key-value pairs costs $\Oh(K_{\max}d)$ and stores $\Oh(K_{\max}d)$ vectors. The same counting argument gives $\Oh(B_{\max}d)$ for depth summaries and $\Oh(H_{\max}d)$ for Engram probes. The RetNet state is fixed for a fixed model. No step in this count depends on $N$ unless one of the caps is chosen as a function of $N$.
+\end{proof}
+
+\subsection{Contributions and claim boundaries}
+
+This draft makes four specific contributions.
+\begin{enumerate}
+    \item \textbf{A conditional memory hierarchy.} RetNet handles default sequence streaming; snapshot readout handles rare long-range exact-recall events; AttnRes handles depth-wise reuse of intermediate representations; Engram handles frequent local pattern lookup.
+    \item \textbf{A budgeted snapshot mechanism.} The snapshot cache is defined with an explicit cap $K_{\max}$, an eviction policy, and a budget loss. This avoids the misleading statement that a data-dependent cache is automatically globally $\Oh(1)$.
+    \item \textbf{Conditional mathematical statements.} The mathematical results are stated as lemmas and sufficient conditions rather than as unconditional guarantees. In particular, snapshot readout is useful only when capture, non-eviction, query alignment, and logit-margin conditions hold simultaneously.
+    \item \textbf{An optimization account for guarded branches.} AdamW keeps first- and second-moment states per parameter. Dense-backbone momentum does not literally flow into guard parameters. Guard modules are instead hard to learn because their gradients can be sparse, small, clipped, delayed by small LayerScale values, or suppressed by shared schedules.
+\end{enumerate}
+
+The paper does \emph{not} claim that this architecture already beats strong Transformer, RetNet, Mamba, or MoE baselines on general long-context language modeling. It is a research proposal plus preliminary synthetic diagnostics. The empirical burden for a full claim is listed in Section~\ref{sec:evaluation}.
+
+\section{Architecture Overview}
+
+At layer $l$ and time $t$, let $x_{l,t}\in\mathbb{R}^d$ be the hidden representation and $u_{l,t}=\RMS(x_{l,t})$. The hidden update is written as
+\begin{equation}
+\label{eq:hidden-update}
+x_{l+1,t}
+= x_{l,t}
++ \Ret_l(u_{l,t}; S_{l,t})
++ \FFN_l(u_{l,t})
++ \lambda_{E,l}\,m_{E,l}\Eng_l(u_{l,t}, y_{1:t})
++ \lambda_{A,l}\,m_{A,l}\Att_l(u_{l,t}, \mathcal{D}_l),
+\end{equation}
+where $S_{l,t}$ is the recurrent retention state, $\mathcal{D}_l$ is the set of previous layer or block-level depth sources, and $m_{E,l},m_{A,l}\in\{0,1\}$ specify interleaved placement of non-local branches. The Engram and AttnRes branches are guarded by small LayerScale coefficients $\lambda_{E,l},\lambda_{A,l}$.
+
+Snapshot memory is not added directly into Equation~\eqref{eq:hidden-update}. It is read at the output side:
+\begin{align}
+\label{eq:snapshot-read}
+r_t &= \mathrm{Attn}\big(q_t^C, K_{\Cache}, V_{\Cache}\big),\\
+z_t &= W_U x_{L,t} + \lambda_{C}\, W_C r_t,
+\label{eq:logit-read}
+\end{align}
+where $z_t$ are vocabulary logits, $W_U$ is the usual unembedding matrix, and $W_C$ maps the snapshot readout vector into vocabulary-logit space. This projection is necessary: a hidden-vector readout is not itself a logit bias.
+
+\subsection{Why the axes are separated rather than collapsed}
+
+The modules are not mathematically orthogonal in the sense of independent subspaces. They share the same residual stream and therefore can interact. The term ``four-axis'' means an engineering decomposition of responsibility:
+\begin{center}
+\begin{tabular}{p{0.16\linewidth}p{0.27\linewidth}p{0.24\linewidth}p{0.22\linewidth}}
+\toprule
+Axis & Main job & Low-cost mechanism & Failure mode \\
+\midrule
+Time & Stream long sequences & RetNet recurrent/chunkwise recurrent state & Exponential forgetting and superposition \\
+Milestone & Preserve sparse pivotal items & Budgeted snapshot readout & Missed capture, eviction, query mismatch \\
+Depth & Reuse intermediate reasoning features & Block AttnRes over layer/block sources & Over-retrieval or depth confusion \\
+Local pattern & Store frequent surface patterns & Engram N-gram lookup & Collision and synonym blindness \\
+Channel & Dynamic transformation & Dense FFN first; MoE later & Routing instability if MoE is added too early \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{The Time Axis: RetNet Streaming plus Budgeted Snapshots}
+
+RetNet is attractive because its retention mechanism supports parallel training, recurrent decoding, and chunkwise recurrent processing. In the proposed architecture, RetNet is the default path: it processes the entire sequence with low marginal decoding memory and avoids a full Transformer KV cache. However, a strictly contractive recurrent state cannot be expected to preserve arbitrary exact facts forever. Appendix~\ref{app:retnet} states the standard decay lemma under an operator-norm contraction assumption.
+
+\subsection{The readout bottleneck}
+
+A naive fix is to stop decay when a special marker appears. This is insufficient. Even if the critical state component is not decayed, the recurrent state also accumulates later key-value outer products. The signal may remain present but become hard to decode because it is superposed with later high-entropy content. We therefore separate \emph{state preservation} from \emph{readout}. When the model detects a milestone, it creates a separate snapshot item that can be queried directly at the output stage.
+
+\subsection{Snapshot capture and cache budget}
+
+For each token, a gate head predicts a capture probability
+\begin{equation}
+\label{eq:gate}
+g_t = \sigmoid(a^\top u_{l_g,t}+b).
+\end{equation}
+A snapshot item is formed as
+\begin{equation}
+\label{eq:item}
+c_t = (k_t^C, v_t^C, s_t, t),\qquad k_t^C=W_K^C u_{l_g,t},\quad v_t^C=W_V^C u_{l_g,t},
+\end{equation}
+where $s_t$ is an eviction priority. The cache update is
+\begin{equation}
+\label{eq:budget-update}
+\Cache_t = \mathrm{Budget}_{K_{\max}}\Big(\Cache_{t-1}\cup \{c_t: g_t>\theta\}\Big).
+\end{equation}
+The operator $\mathrm{Budget}_{K_{\max}}$ keeps at most $K_{\max}$ items. A simple priority score is
+\begin{equation}
+\label{eq:priority}
+s_t = \alpha g_t + \beta\,\mathrm{surprise}_t + \chi\,\mathrm{utility}_t - \rho\,\mathrm{age}_t,
+\end{equation}
+where $\mathrm{surprise}_t$ can be approximated by token-level negative log-likelihood and $\mathrm{utility}_t$ is a learned scalar. The exact policy can be replaced by FIFO, reservoir sampling, learned eviction, or task-specific retention, but a policy must be specified before making a bounded-memory claim.
+
+A soft budget regularizer discourages the model from treating every token as a milestone, but the sign of the entropy term matters. During early training, a negative entropy term can keep the gate exploratory; later it can be annealed to zero or replaced by a hardening term:
+\begin{align}
+\label{eq:budget-loss}
+\mathcal{L}_{\mathrm{gate}}
+&= \eta\left[\sum_{t=1}^{N} g_t - K_{\mathrm{target}}\right]_+^2
+- \zeta_{\mathrm{explore}}(s)\sum_{t=1}^{N} H_{\mathrm{Bernoulli}}(g_t)
++ \zeta_{\mathrm{hard}}(s)\sum_{t=1}^{N}g_t(1-g_t), \\
+\zeta_{\mathrm{explore}}(s)&\downarrow 0,\qquad
+\zeta_{\mathrm{hard}}(s)\uparrow \zeta_{\max}
+\quad\text{over training stage }s.
+\end{align}
+The budget term alone cannot prevent an all-off gate; it must be paired with supervised milestones, oracle-capture distillation, or an auxiliary retrieval loss whenever exact-recall behavior is required.
+
+\subsection{What snapshot readout can and cannot guarantee}
+
+Snapshot readout can avoid recurrent superposition noise only for items that are captured, retained, and later queried with sufficient margin. It is not a universal memory. If every token is pivotal, $K_{\max}$ must grow with $N$ or the system must lose information. The correct claim is therefore:
+
+\begin{quote}
+For tasks with sparse pivotal information, a capped snapshot cache can convert some long-range exact-recall failures of a strictly recurrent state into an $\Oh(Kd)$ readout problem.
+\end{quote}
+
+The relevant trade-off is therefore explicit and measurable: allocate memory to a small subset of selected states rather than retaining all token states in a full KV cache.
+
+\section{The Depth Axis: Distance-Biased Block Attention Residuals}
+
+PreNorm residual networks accumulate all layer outputs with fixed unit weights. As depth increases, early features can be diluted in the residual stream. Attention Residuals replace fixed accumulation with softmax attention over previous layer outputs, allowing deeper layers to choose which earlier representations to reuse. Block AttnRes reduces the overhead by attending to block-level summaries rather than all layer-level outputs.
+
+\subsection{Distance-biased depth retrieval}
+
+Let $\mathcal{D}_l=\{b_0,\ldots,b_{m-1}\}$ be the depth sources visible to layer $l$. The proposed score is
+\begin{align}
+\label{eq:attnres-score}
+s_{i\to l} &= \langle q_l, k_i\rangle - c_l\,d(l,i), \\
+\beta_{i\to l} &= \frac{\exp(s_{i\to l}/\tau)}{\sum_{j}\exp(s_{j\to l}/\tau)}.
+\end{align}
+The distance penalty is not meant to erase old information. It is a recency prior: recent reasoning states are preferred by default, but an older source can still be recovered if its semantic relevance score is high enough. Appendix~\ref{app:attnres-margin} gives a sufficient softmax-margin condition.
+
+\subsection{Why this helps long reasoning}
+
+Long reasoning is not only a sequence-length problem. It is also a depth-routing problem: later layers need access to earlier symbolic commitments, partial computations, or problem statements without reconstructing them from a heavily mixed residual stream. Block AttnRes supplies a low-overhead depth memory of size $B$, while RetNet supplies time streaming. The two paths are complementary: RetNet compresses across tokens; AttnRes selectively routes across layers.
+
+\subsection{Guarding against manifold tearing}
+
+Because AttnRes can inject high-variance features into deep layers, it is gated by a small coefficient $\lambda_A$ and placed at selected blocks rather than every layer. We use
+\begin{equation}
+|\lambda_{A,l}|\leq \epsilon_{\mathrm{scale}},\qquad \epsilon_{\mathrm{scale}}\approx 10^{-4}
+\end{equation}
+at initialization. Section~\ref{sec:optimization} describes how to avoid leaving this coefficient permanently dead.
+
+\section{The Local Pattern Axis: Engram Lookup as Static Conditional Memory}
+
+Engram-style memory adds a separate sparsity axis: instead of using neural computation to reconstruct frequent local dependencies, a deterministic N-gram key retrieves a learned memory vector in approximately constant lookup time. This is best understood as a static pattern memory, not as a semantic search engine.
+
+\subsection{Role in the proposed architecture}
+
+The Engram branch handles common local patterns, entity fragments, boilerplate expressions, and other repeated surface-level dependencies. By offloading such patterns, the recurrent and FFN pathways can spend more capacity on dynamic reasoning and global context. The Engram branch is therefore treated as a separate conditional-memory budget: it trades table storage and predictable lookup for reduced repeated neural reconstruction of highly regular patterns.
+
+\subsection{Open-domain limitations}
+
+Hard hashing is brittle. It does not understand synonyms, paraphrases, or entity aliases unless the addressing scheme is explicitly designed for them. It also faces Zipfian collision hot spots: common or semantically related phrases do not collide like independent uniform random variables. Appendix~\ref{app:engram} therefore treats idealized collision bounds as sanity checks only, and recommends measuring empirical collision covariance.
+
+\subsection{Safe injection}
+
+The Engram branch is injected as
+\begin{equation}
+\label{eq:engram-inject}
+x_{l+1,t} \leftarrow x_{l+1,t} + \lambda_{E,l}\,m_{E,l}\,\Eng_l(u_{l,t}, y_{t-n+1:t}),
+\end{equation}
+with small initial $\lambda_{E,l}$, interleaved placement, and optional dropout during training. Evaluation must include a causal-drop test: run the same checkpoint with Engram enabled and disabled at inference to estimate the marginal contribution of static memory.
+
+\section{The Channel Axis: Dense FFN First, MoE Later}
+
+The revised architecture keeps a Dense FFN scaffold in the first phase. This is deliberately conservative. Combining RetNet sequence parallelism, Block AttnRes depth communication, Engram table lookup, and MoE all-to-all routing in one first experiment would make failures difficult to diagnose. Dense FFNs provide a stable baseline for verifying whether the new memory paths learn useful roles.
+
+MoE can be reintroduced after the memory pathways are validated. At that point, the relevant risk is not simply mathematical Lipschitz continuity of the router, but the coupled dynamics of routing temperature, expert capacity, auxiliary load-balancing losses, token dropping, and residual injection variance. The migration plan should therefore use a long warmup for $\lambda_E$ and $\lambda_A$, per-group clipping, and router-specific stability metrics.
+
+\section{System Vulnerabilities and Engineering Mitigations}
+
+\subsection{Known pitfalls}
+
+\begin{center}
+\begin{tabular}{p{0.25\linewidth}p{0.34\linewidth}p{0.31\linewidth}}
+\toprule
+Pitfall & Cause & Mitigation \\
+\midrule
+Logic cliff & A pivotal token is not captured or is evicted & Soft milestone gates, supervised trigger data, budget loss, utility-based eviction \\
+Readout mismatch & Final query does not align with cached key & Contrastive cache-query loss, auxiliary retrieval target, multi-head cache readout \\
+Manifold tearing & Engram or AttnRes injects high-variance features & Interleaved placement, LayerScale, RMSNorm before injection, dropout \\
+Dead modules & Small $\lambda$ values and sparse gates receive weak gradients & Curriculum, per-group learning rates, per-group clipping, delayed backbone unfreeze \\
+Hash brittleness & Hard N-gram lookup lacks semantic generalization & Entity normalization, LSH, learned projection, closed-domain tables \\
+MoE collapse & Non-local branches perturb router inputs & Dense phase first, slow reintegration, router entropy and load metrics \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Why ``orthogonal'' should be interpreted carefully}
+
+The modules are architecturally separated, but not statistically independent. Snapshot failure can increase pressure on AttnRes or Engram. Engram collision noise can perturb the residual stream and damage depth routing. For this reason, global feasibility should be studied as a conditional failure graph rather than as a product of independent success probabilities.
+
+\section{Preliminary Synthetic Diagnostics}
+
+The existing diagnostics are useful for debugging signal paths, but they are not sufficient evidence for generalized long-context superiority. They should be reported as preliminary tests with explicit limitations.
+
+\subsection{Time-axis diagnostic: high-entropy needle}
+
+The high-entropy needle task tests whether a model can recover a random password-like token from a 512-token context under accelerated RetNet decay $\gamma=0.95$. The preliminary result is:
+
+\begin{center}
+\begin{tabular}{p{0.30\linewidth}cp{0.46\linewidth}}
+\toprule
+Model variant & Held-out EM & Interpretation \\
+\midrule
+Vanilla RetNet & 0.000 & Strict recurrent state fails under this stress setting \\
+Snapshot residual injection & 0.031 & Direct residual reinjection is unstable/weak \\
+Snapshot-to-readout bias & 0.344 & Readout path helps, but is far from solved exact recall \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The result should not be interpreted as a solved exact-recall task. It indicates only that an isolated readout path can expose information that residual reinjection fails to recover under this diagnostic setup. A publishable claim requires multiple seeds, context-length sweeps, decay sweeps, stronger baselines, confidence intervals, and latency/memory measurements.
+
+\subsection{Knowledge-axis diagnostic: alien dictionary}
+
+The alien dictionary task isolates whether Engram behaves as a static lookup table. The train/test key split produced:
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Model variant & Train-key EM & Test-key EM \\
+\midrule
+Vanilla RetNet & high, near memorization & 0.000 \\
+Full model with Engram & 0.992 & 0.000 \\
+Engram dropped at inference & 0.969 & 0.000 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The result supports a narrow causal statement: the Engram branch contributes to seen-key lookup in this synthetic task. It also confirms a limitation: hard Engram does not generalize to unseen keys without semantic addressing.
+
+\section{Implementation and Optimization}
+\label{sec:optimization}
+
+\subsection{Forward pass guardrails}
+
+Algorithm~\ref{alg:forward-layer} gives the layer-level integration. The snapshot pathway is intentionally recorded outside the residual update and is read only through the output-side projection in Equations~\eqref{eq:snapshot-read}--\eqref{eq:logit-read}.
+
+\begin{algorithm}[H]
+\caption{Forward pass of a budgeted hybrid layer}
+\label{alg:forward-layer}
+\begin{algorithmic}[1]
+\Require hidden state $x$, token ids $y_{1:t}$, RetNet state $S$, depth sources $\mathcal{D}$, snapshot cache $\Cache$, budget $K_{\max}$
+\Ensure updated hidden state $x'$, RetNet state $S'$, snapshot cache $\Cache'$
+\State $u \gets \RMS(x)$
+\State $(r,S') \gets \Ret(u,S)$ \Comment{time-axis recurrent/chunkwise recurrent update}
+\State $x \gets x+r$
+\State $x \gets x+\FFN(\RMS(x))$ \Comment{dense channel scaffold}
+\If{the current layer is assigned to Engram}
+    \State $e \gets \Eng(\RMS(x),y_{1:t})$
+    \State $x \gets x+\lambda_E e$ \Comment{guarded local-pattern injection}
+\EndIf
+\If{the current layer is assigned to Block AttnRes}
+    \State $(a,\beta) \gets \Att(\RMS(x),\mathcal{D})$
+    \State $x \gets x+\lambda_A a$ \Comment{guarded depth-axis reuse}
+\EndIf
+\State $g \gets \sigmoid(h_{\mathrm{gate}}(\RMS(x)))$
+\If{$g>\theta$}
+    \State $c \gets (W_K^C\RMS(x), W_V^C\RMS(x), s(x,g), t)$
+    \State $\Cache' \gets \mathrm{Budget}_{K_{\max}}(\Cache\cup\{c\})$
+\Else
+    \State $\Cache' \gets \Cache$
+\EndIf
+\State \Return $(x,S',\Cache')$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Optimizer groups and clipping}
+
+AdamW maintains first- and second-moment estimates per parameter. The dense backbone therefore does not transfer momentum into the guard parameters. The practical concern is coupling through shared schedules, small LayerScale coefficients, sparse gate activation, and global gradient clipping. Algorithm~\ref{alg:optim} separates parameter groups so that these effects can be measured and controlled.
+
+\begin{algorithm}[H]
+\caption{Optimizer grouping for guarded memory branches}
+\label{alg:optim}
+\begin{algorithmic}[1]
+\Require model parameters $\Theta$, base learning rate $\eta$
+\Ensure AdamW optimizer with separate parameter groups
+\State $\Theta_{\mathrm{base}}\gets\varnothing$, $\Theta_{\mathrm{guard}}\gets\varnothing$, $\Theta_{\mathrm{cache}}\gets\varnothing$
+\ForAll{$(n,p)\in\Theta$}
+    \If{$n$ contains $\lambda_E$, $\lambda_A$, or a gate-bias parameter}
+        \State $\Theta_{\mathrm{guard}}\gets\Theta_{\mathrm{guard}}\cup\{p\}$
+    \ElsIf{$n$ contains a snapshot, cache-readout, or $\lambda_C$ parameter}
+        \State $\Theta_{\mathrm{cache}}\gets\Theta_{\mathrm{cache}}\cup\{p\}$
+    \Else
+        \State $\Theta_{\mathrm{base}}\gets\Theta_{\mathrm{base}}\cup\{p\}$
+    \EndIf
+\EndFor
+\State create AdamW group $(\Theta_{\mathrm{base}},\eta,\beta_1=0.9,\beta_2=0.95,\mathrm{wd}=0.01)$
+\State create AdamW group $(\Theta_{\mathrm{guard}},5\eta,\beta_1=0.0,\beta_2=0.95,\mathrm{wd}=0)$
+\State create AdamW group $(\Theta_{\mathrm{cache}},3\eta,\beta_1=0.5,\beta_2=0.95,\mathrm{wd}=0)$
+\State apply gradient clipping separately to $\Theta_{\mathrm{base}}$, $\Theta_{\mathrm{guard}}$, and $\Theta_{\mathrm{cache}}$
+\State \Return optimizer
+\end{algorithmic}
+\end{algorithm}
+
+The separate groups are not intended to assert that high learning rates are universally optimal. They define an experimental control: if a branch fails to activate, one can distinguish insufficient gradient signal from suppression by a global optimizer or clipping policy.
+
+\section{Evaluation Protocol}
+\label{sec:evaluation}
+
+A convincing evaluation must compare against iso-parameter and iso-FLOP baselines. The baseline set should include a standard Transformer with FlashAttention-style kernels, vanilla RetNet, Mamba or another strong state-space/linear baseline, and a RetNet variant with a conventional selected KV or memory-token cache.
+
+\subsection{Ablation matrix}
+
+\begin{center}
+\begin{tabular}{p{0.22\linewidth}p{0.66\linewidth}}
+\toprule
+Component & Required ablations \\
+\midrule
+Snapshot cache & no cache; oracle capture; learned gate; random capture; FIFO vs learned eviction; $K_{\max}$ sweep \\
+Snapshot readout & residual injection; hidden readout; projected logit bias; contrastive cache-query training \\
+AttnRes & no AttnRes; full AttnRes; Block AttnRes; distance penalty sweep; block count sweep \\
+Engram & no Engram; hard hash; LSH/projection; collision stress; causal-drop evaluation \\
+Optimization & shared clipping vs per-group clipping; shared LR vs guard LR; backbone freeze curriculum \\
+Scale & 125M, 350M, 1B, and 3B+ parameter regimes if resources permit \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Benchmark families}
+
+\begin{itemize}
+    \item \textbf{Long-context retrieval:} Needle-in-a-haystack variants, multi-query retrieval, RULER-style synthetic tasks, LongBench, and official InfiniteBench tasks where the full benchmark protocol is used.
+    \item \textbf{Controlled very-long-context diagnostics:} if the official InfiniteBench suite is not used, report the setting as an InfiniteBench-inspired diagnostic rather than as an InfiniteBench result. The protocol should state the document type, context length grid (for example 64K, 128K, and 256K tokens), query placement, answer-span distribution, and whether retrieval requires lexical matching or multi-hop reasoning.
+    \item \textbf{Long reasoning:} GSM8K, MATH, theorem/proof-style traces, multi-hop QA, and tasks with deliberately delayed premises.
+    \item \textbf{Language modeling:} held-out perplexity/loss at matched compute and parameter count.
+    \item \textbf{Systems metrics:} peak memory, prefill latency, decoding throughput, host-memory bandwidth for Engram, cache-hit rate, and effective $K$ usage.
+\end{itemize}
+
+The primary target is the Pareto frontier of accuracy, memory, and latency rather than accuracy alone. The architecture succeeds if it reaches comparable or better long-context reasoning quality with substantially smaller growth in runtime memory than a full KV-cache Transformer.
+
+\section{Conditional Feasibility and Cascade Failures}
+
+A more realistic success model is conditional rather than independent. Let
+\begin{itemize}
+    \item $S_{\mathrm{cap}}$: the pivotal token is captured;
+    \item $S_{\mathrm{keep}}$: it is not evicted before use;
+    \item $S_{\mathrm{align}}$: the final query assigns sufficient mass to the cached item;
+    \item $A_{\mathrm{use}}$: depth routing preserves useful intermediate states;
+    \item $E_{\mathrm{safe}}$: Engram injection does not corrupt the residual manifold.
+\end{itemize}
+A diagnostic factorization is
+\begin{equation}
+\label{eq:cascade}
+\Prob(\mathrm{success})
+= \Prob(S_{\mathrm{cap}})
+\Prob(S_{\mathrm{keep}}\mid S_{\mathrm{cap}})
+\Prob(S_{\mathrm{align}}\mid S_{\mathrm{cap}},S_{\mathrm{keep}})
+\Prob(A_{\mathrm{use}},E_{\mathrm{safe}}\mid S_{\mathrm{cap}},S_{\mathrm{keep}},S_{\mathrm{align}}).
+\end{equation}
+This factorization is a measurement decomposition rather than a closed-form theorem. Each event should be measured directly. For example, oracle-capture experiments estimate the headroom of the snapshot readout independent of gate errors, while causal-drop Engram experiments estimate the static-memory contribution independent of the backbone.
+
+\section{Limitations}
+
+The architecture has clear failure cases.
+\begin{itemize}
+    \item If a task requires exact retention of most tokens, a small snapshot cache cannot replace a full KV cache.
+    \item If milestone supervision is weak, the gate can miss pivotal information or waste budget on irrelevant tokens.
+    \item If a cached item is semantically relevant but lexically mismatched, hard snapshot and hard Engram lookup may fail without learned alignment.
+    \item If AttnRes overemphasizes old depth sources, it may create depth confusion rather than reasoning stability.
+    \item If Engram table accesses are placed in slow host memory without careful prefetching, lookup latency can erase theoretical gains.
+    \item If MoE is reintroduced too early, routing collapse can mask whether the memory hierarchy works.
+\end{itemize}
+
+These limitations define the measurements needed to determine whether the architecture is useful beyond synthetic diagnostics.
+
+\section{Conclusion}
+
+This paper proposes a cost-aware long-context architecture built from RetNet streaming, a budgeted snapshot cache, distance-biased Attention Residuals, and Engram lookup. The revised claim is intentionally narrower than a global $\Oh(1)$ memory guarantee: for workloads where only a sparse subset of tokens is pivotal, the architecture may achieve better long-context recall and multi-step reasoning per unit of memory by spending $\Oh(K)$ explicit cache cost only on selected milestones, while delegating frequent local patterns to $\Oh(1)$ static lookup and depth-wise reasoning reuse to Block AttnRes. The next step is empirical: iso-compute baselines, cache-budget sweeps, causal ablations, and hardware profiling.
+
+\begin{thebibliography}{99}
+
+\bibitem{vaswani2017}
+Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz Kaiser, and Illia Polosukhin.
+\textit{Attention Is All You Need}.
+Advances in Neural Information Processing Systems, 2017.
+
+\bibitem{retnet}
+Yutao Sun, Li Dong, Shaohan Huang, Shuming Ma, Yuqing Xia, Jilong Xue, Jianyong Wang, and Furu Wei.
+\textit{Retentive Network: A Successor to Transformer for Large Language Models}.
+arXiv:2307.08621, 2023.
+
+\bibitem{mamba}
+Albert Gu and Tri Dao.
+\textit{Mamba: Linear-Time Sequence Modeling with Selective State Spaces}.
+arXiv:2312.00752, 2023.
+
+\bibitem{attnres}
+Kimi Team, Guangyu Chen, Yu Zhang, Jianlin Su, Weixin Xu, Siyuan Pan, Yaoyu Wang, Yucheng Wang, Guanduo Chen, Bohong Yin, Yutian Chen, Junjie Yan, Ming Wei, Y. Zhang, Fanqing Meng, Chao Hong, Xiaotong Xie, Shaowei Liu, Enzhe Lu, Yunpeng Tai, Yanru Chen, Xin Men, Haiqing Guo, Y. Charles, Haoyu Lu, Lin Sui, Jinguo Zhu, Zaida Zhou, Weiran He, Weixiao Huang, Xinran Xu, Yuzhi Wang, Guokun Lai, Yulun Du, Yuxin Wu, Zhilin Yang, and Xinyu Zhou.
+\textit{Attention Residuals}.
+arXiv:2603.15031, 2026.
+
+\bibitem{engram}
+Xin Cheng, Wangding Zeng, Damai Dai, Qinyu Chen, Bingxuan Wang, Zhenda Xie, Kezhao Huang, Xingkai Yu, Zhewen Hao, Yukun Li, Han Zhang, Huishuai Zhang, Dongyan Zhao, and Wenfeng Liang.
+\textit{Conditional Memory via Scalable Lookup: A New Axis of Sparsity for Large Language Models}.
+arXiv:2601.07372, 2026.
+
+\bibitem{alibi}
+Ofir Press, Noah A. Smith, and Mike Lewis.
+\textit{Train Short, Test Long: Attention with Linear Biases Enables Input Length Extrapolation}.
+International Conference on Learning Representations, 2022.
+
+\bibitem{adamw}
+Ilya Loshchilov and Frank Hutter.
+\textit{Decoupled Weight Decay Regularization}.
+International Conference on Learning Representations, 2019.
+
+\bibitem{flash2}
+Tri Dao.
+\textit{FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning}.
+arXiv:2307.08691, 2023.
+
+\bibitem{freedman1975}
+David A. Freedman.
+\textit{On Tail Probabilities for Martingales}.
+The Annals of Probability, 1975.
+
+\bibitem{switch}
+William Fedus, Barret Zoph, and Noam Shazeer.
+\textit{Switch Transformers: Scaling to Trillion Parameter Models with Simple and Efficient Sparsity}.
+Journal of Machine Learning Research, 2022.
+
+\bibitem{longbench}
+Yushi Bai, Xin Lv, Jiajie Zhang, Hongchang Lyu, Jiankai Tang, Zhidian Huang, Zhengxiao Du, Xiao Liu, Aohan Zeng, Lei Hou, Yuxiao Dong, Jie Tang, and Juanzi Li.
+\textit{LongBench: A Bilingual, Multitask Benchmark for Long Context Understanding}.
+arXiv:2308.14508, 2023.
+
+\bibitem{ruler}
+Cheng-Ping Hsieh, Simeng Sun, Samuel Kriman, Shantanu Acharya, Dima Rekesh, Fei Jia, and Boris Ginsburg.
+\textit{RULER: What's the Real Context Size of Your Long-Context Language Models?}
+arXiv:2404.06654, 2024.
+
+\bibitem{infinitebench}
+Xinrong Zhang, Yingfa Chen, Shengding Hu, Zihang Xu, Junhao Chen, Moo Hao, Xu Han, Zhen Thai, Shuo Wang, Zhiyuan Liu, and Maosong Sun.
+\textit{InfiniteBench: Extending Long Context Evaluation Beyond 100K Tokens}.
+arXiv:2402.13718, 2024.
+
+\end{thebibliography}
+
+\newpage
+\appendix
+
+\section{RetNet Decay and Query Degradation}
+\label{app:retnet}
+
+\begin{lemma}[Contractive recurrent path decay]
+Let the recurrent state be updated as
+\begin{equation}
+S_t = \Gamma S_{t-1} + k_t v_t^\top,
+\end{equation}
+where $\norm{\Gamma}_{op}\leq \gamma<1$ and all local projection Jacobians are bounded. The contribution of a state component originating at token $i$ to a loss at token $T$ is bounded by a constant times $\gamma^{T-i}$.
+\end{lemma}
+
+\begin{proof}
+Unrolling the recurrence gives
+\begin{equation}
+S_T=\Gamma^{T-i}S_i + \sum_{s=i+1}^{T}\Gamma^{T-s}k_s v_s^\top.
+\end{equation}
+The derivative of $S_T$ with respect to $S_i$ is $\Gamma^{T-i}$. By submultiplicativity,
+\begin{equation}
+\norm*{\frac{\partial S_T}{\partial S_i}}_{op}
+=\norm{\Gamma^{T-i}}_{op}
+\leq \norm{\Gamma}_{op}^{T-i}
+\leq \gamma^{T-i}.
+\end{equation}
+Multiplying by bounded local Jacobians and the bounded downstream loss gradient yields the result.
+\end{proof}
+
+\begin{proposition}[Worst-case query perturbation]
+Let $Q_T=f_Q(S_T)$ where $f_Q$ is locally Lipschitz with constant $L_Q$. Let the ideal state preserve only the milestone component, $S_T^{\star}=\Gamma^{T-i}S_i$, and assume $\norm{k_s v_s^\top}_2\leq M_{kv}$. Then
+\begin{equation}
+\norm{Q_T-Q_T^{\star}}_2
+\leq L_Q\norm*{\sum_{s=i+1}^{T}\Gamma^{T-s}k_s v_s^\top}_2
+\leq \frac{L_Q M_{kv}}{1-\gamma}.
+\end{equation}
+\end{proposition}
+
+\begin{remark}
+The bound is intentionally worst-case and does not prove typical behavior. It only motivates an isolated readout path when exact retrieval is required.
+\end{remark}
+
+\section{Snapshot Readout Margin}
+\label{app:snapshot}
+
+\begin{proposition}[Sufficient logit-margin condition]\label{prop:logit-margin}
+Assume a target token $y^\star$ and a competitor token $y$ at decoding step $T$. Let the base logits be $z^0=W_Ux_{L,T}$ and the cache contribution be $\Delta z=\lambda_C W_C r_T$. If
+\begin{equation}
+\label{eq:logit-margin}
+(e_{y^\star}-e_y)^\top \Delta z
+>
+(e_y-e_{y^\star})^\top z^0 + m
+\end{equation}
+for all $y\neq y^\star$ and margin $m>0$, then the cache-augmented logits rank $y^\star$ above every competitor by at least $m$.
+\end{proposition}
+
+\begin{proof}
+The augmented logit difference is
+\begin{equation}
+(z_{y^\star}-z_y)
+= (z^0_{y^\star}-z^0_y) + (\Delta z_{y^\star}-\Delta z_y).
+\end{equation}
+Inequality~\eqref{eq:logit-margin} is exactly the condition that this difference exceeds $m$.
+\end{proof}
+
+\begin{remark}
+This is a conditional success statement, not a guarantee that the model will learn the correct capture policy or query alignment. Those must be trained and measured.
+\end{remark}
+
+\begin{proposition}[Cache-query mass condition]
+\label{prop:cache-mass}
+Let the cache attention scores be $a_j=\langle q_T^C,k_j^C\rangle$ and
+\begin{equation}
+\alpha_i=\frac{\exp(a_i/\tau_C)}{\sum_{j=1}^{K}\exp(a_j/\tau_C)}.
+\end{equation}
+A sufficient condition for the desired cached item $i$ to receive attention mass at least $\epsilon$ is
+\begin{equation}
+\label{eq:cache-mass-margin}
+a_i\geq \max_{\substack{1\le j\le K\\ j\ne i}}a_j+\tau_C\log\left(\frac{(K-1)\epsilon}{1-\epsilon}\right).
+\end{equation}
+If this condition holds and the resulting logit contribution $\Delta z=\lambda_CW_C\sum_j\alpha_jv_j^C$ satisfies Proposition~\ref{prop:logit-margin}, then the snapshot path ranks the target token above its competitors. Thus exact readout requires both cache-query alignment and a vocabulary-logit margin.
+\end{proposition}
+
+\begin{proof}
+The proof is identical to the softmax-margin derivation in Proposition~\ref{prop:attnres-margin}: start from $\alpha_i\geq\epsilon$, rearrange, upper-bound the distractor exponential sum by $(K-1)\exp(\max_{\substack{1\le j\le K\\ j\ne i}}a_j/\tau_C)$, and take logarithms.
+\end{proof}
+
+\begin{remark}
+The margin is meaningful for selective retrieval when $\epsilon>1/K$. If $\epsilon\leq 1/K$, even a nearly uniform cache attention distribution can satisfy the mass condition.
+\end{remark}
+
+\section{AttnRes Value Path and Distance Margin}
+\label{app:attnres-margin}
+
+\begin{lemma}[Value path without intermediate Jacobian product]
+Let the depth aggregation at layer $l$ be
+\begin{equation}
+h_l=\sum_{i=0}^{m-1}\beta_{i\to l}b_i,
+\end{equation}
+where the weights $\beta_{i\to l}$ are produced by a softmax over source scores. For downstream gradient $g_l=\partial \mathcal{L}/\partial h_l$, the gradient with respect to a source $b_i$ decomposes as
+\begin{equation}
+\nabla_{b_i}\mathcal{L}
+=\beta_{i\to l}g_l + \sum_{j=0}^{m-1}(b_j^\top g_l)\frac{\partial \beta_{j\to l}}{\partial b_i}.
+\end{equation}
+The first term is a direct value path that does not contain a product of all intermediate layer Jacobians.
+\end{lemma}
+
+\begin{proof}
+Differentiate $h_l$ with respect to $b_i$:
+\begin{equation}
+\frac{\partial h_l}{\partial b_i}
+= \beta_{i\to l}I + \sum_{j=0}^{m-1} b_j\left(\frac{\partial \beta_{j\to l}}{\partial b_i}\right)^\top.
+\end{equation}
+Multiplying by $g_l$ yields the stated decomposition.
+\end{proof}
+
+\begin{proposition}[Distance-biased recoverability]
+\label{prop:attnres-margin}
+Let
+\begin{equation}
+s_i=\langle q_l,k_i\rangle-c\,d(l,i),\qquad
+\beta_i=\frac{\exp(s_i/\tau)}{\sum_{j}\exp(s_j/\tau)},\quad \tau>0.
+\end{equation}
+A sufficient condition for $\beta_i\geq\epsilon$ is
+\begin{equation}
+\langle q_l,k_i\rangle-c\,d(l,i)
+\geq
+\max_{\substack{1\le j\le m\\ j\ne i}}\big(\langle q_l,k_j\rangle-c\,d(l,j)\big)
++\tau\log\left(\frac{(m-1)\epsilon}{1-\epsilon}\right).
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+The condition $\beta_i\geq\epsilon$ is equivalent to
+\begin{equation}
+(1-\epsilon)\exp(s_i/\tau)\geq \epsilon\sum_{\substack{1\le j\le m\\ j\ne i}}\exp(s_j/\tau).
+\end{equation}
+Using $\sum_{\substack{1\le j\le m\\ j\ne i}}\exp(s_j/\tau)\leq (m-1)\exp(\max_{\substack{1\le j\le m\\ j\ne i}}s_j/\tau)$ and taking logs gives the result. When $\epsilon\leq 1/m$, the logarithmic term is non-positive, so the condition becomes weak; selective retrieval should normally set $\epsilon>1/m$.
+\end{proof}
+
+\section{Engram Collision Bounds under Dependence}
+\label{app:engram}
+
+\subsection{Idealized collision model}
+
+Let a queried Engram bucket contain collision perturbations $\eta_1,\ldots,\eta_n\in\mathbb{R}^d$. If these perturbations were independent, centered, and uniformly norm-bounded, standard concentration inequalities would control the probability that their aggregate injection crosses a task margin. This model is useful as a diagnostic baseline, but it is not a faithful model of open-domain text. Consecutive N-grams share tokens, frequent phrases concentrate probability mass, and semantically related strings may be mapped to nearby or identical addresses by preprocessing.
+
+The raw vector perturbation is therefore decomposed into a systematic dependent component and a residual fluctuation component. This distinction is important: concentration controls the latter, but not the former.
+
+\subsection{Directional Bernstein proxy with short-range dependence}
+
+Fix a unit direction $u\in\mathbb{S}^{d-1}$ corresponding to a logit or representation direction whose perturbation is safety-critical. Define the scalar collision process
+\begin{equation}
+Y_r = u^\top \eta_r .
+\end{equation}
+The previous draft implicitly treated $Y_r$ itself as a martingale-difference sequence. That assumption is too strong for NLP hashing, because nearby N-grams create short-range dependence. We instead write, for a lag parameter $\ell$,
+\begin{align}
+m_r^{(\ell)} &= \E\!\left[Y_r\mid \mathcal{F}_{r-\ell:r-1}\right], \\
+X_r^{(\ell)} &= Y_r - m_r^{(\ell)},
+\end{align}
+so that $\E[X_r^{(\ell)}\mid \mathcal{F}_{r-\ell:r-1}]=0$ by construction. The sum of collision noise in direction $u$ becomes
+\begin{equation}
+\sum_{r=1}^{n}Y_r
+= \underbrace{\sum_{r=1}^{n}m_r^{(\ell)}}_{\text{dependent drift}}
++ \underbrace{\sum_{r=1}^{n}X_r^{(\ell)}}_{\text{centered residual}}.
+\end{equation}
+Only the centered residual is eligible for a Bernstein- or Freedman-type concentration argument. The dependent drift must be estimated or bounded separately.
+
+\begin{proposition}[Directional residual concentration]
+\label{prop:directional-bernstein}
+Assume that, after frequency bucketing, local de-biasing, and any required blocking, the residuals are adapted to a filtration $(\mathcal{G}_r)$ and satisfy
+\begin{equation}
+\E[X_r^{(\ell)}\mid\mathcal{G}_{r-1}]=0,
+\qquad
+|X_r^{(\ell)}|\leq R_u .
+\end{equation}
+Define the predictable quadratic variation
+\begin{equation}
+V_n(u)=\sum_{r=1}^{n}\E\!\left[(X_r^{(\ell)})^2\mid\mathcal{G}_{r-1}\right].
+\end{equation}
+Then, for any $\mu>0$,
+\begin{equation}
+\Prob\!\left(\left|\lambda_E\sum_{r=1}^{n}X_r^{(\ell)}\right|\geq \mu\right)
+\leq
+2\exp\!\left(
+-\frac{\mu^2/2}{\lambda_E^2 V_n(u)+|\lambda_E|R_u\mu/3}
+\right).
+\end{equation}
+Consequently, the raw directional perturbation is controlled at margin $\mu_{\mathrm{tot}}$ only when
+\begin{equation}
+|\lambda_E|\left|\sum_{r=1}^{n}m_r^{(\ell)}\right| + \mu < \mu_{\mathrm{tot}}.
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+The first inequality is the scalar martingale Bernstein/Freedman bound applied to the de-biased residual sequence $X_r^{(\ell)}$ under the stated filtration $(\mathcal{G}_r)$, followed by the rescaling factor $\lambda_E$. The final condition follows from the triangle inequality applied to $\lambda_E\sum_r Y_r$. The proposition therefore does not claim that raw NLP collisions are martingale differences; it isolates the additional residual assumption needed after predictable local dependence has been removed or blocked.
+\end{proof}
+
+For stronger short-range dependence, one can replace individual residuals with non-overlapping blocks. Let $\mathcal{B}_b$ be blocks of length $q\geq \ell+1$ and define
+\begin{equation}
+Z_b = \sum_{r\in\mathcal{B}_b} X_r^{(\ell)} .
+\end{equation}
+If separated blocks are approximately independent or satisfy a sufficiently small mixing coefficient, the same bound applies to $\sum_b Z_b$ with block radius $R_{u,q}$ and block variance $V_{n,q}(u)$, plus an explicit mixing error term. This blocked form is less sharp but better aligned with text, where dependence is local rather than absent.
+
+\subsection{Empirical collision diagnostics}
+
+The theory above reduces Engram safety to measurable quantities. For each frequency bucket and domain, estimate
+\begin{equation}
+\Sigma_{\mathrm{coll}} = \E[\eta_x\eta_x^\top],
+\qquad
+b_\ell(u)=\left|\sum_{r=1}^{n}\E[u^\top\eta_r\mid\mathcal{F}_{r-\ell:r-1}]\right|,
+\end{equation}
+and report the largest observed directional variance and predictable drift across task-relevant directions. A practical safety condition is
+\begin{equation}
+\lambda_E^2\,u^\top\Sigma_{\mathrm{coll}}u \ll \mu^2
+\quad\text{and}\quad
+|\lambda_E|\,b_\ell(u)\ll \mu
+\end{equation}
+for the task-specific logit or representation margin $\mu$. If either term is large in common buckets, the appropriate remedy is not a tighter proof but a better addressing scheme, such as entity normalization, learned projection, LSH, or domain-specific tables.
+
+\section{Optimizer Dynamics for Guard Awakening}
+\label{app:optimizer}
+
+\begin{proposition}[LayerScale attenuation of branch learning]
+\label{prop:layerscale-grad}
+Consider a guarded residual branch
+\begin{equation}
+y=x+\lambda B_\phi(x),
+\end{equation}
+and let $g=\partial\mathcal{L}/\partial y$. Then
+\begin{equation}
+\frac{\partial\mathcal{L}}{\partial\lambda}=\langle g,B_\phi(x)\rangle,
+\qquad
+\nabla_\phi\mathcal{L}=\lambda\,J_{B_\phi}(x)^\top g.
+\end{equation}
+Thus a very small $\lambda$ protects the residual stream but also attenuates learning inside $B_\phi$. The scale parameter can still receive an unattenuated gradient, but only if the untrained branch output $B_\phi(x)$ is already aligned with the downstream loss gradient.
+\end{proposition}
+
+\begin{proof}
+The equations follow directly from differentiating $y=x+\lambda B_\phi(x)$ with respect to $\lambda$ and $\phi$ and applying the chain rule.
+\end{proof}
+
+Consider a guarded branch $x\mapsto x+\lambda B_\phi(x)$ with $|\lambda|\ll1$ at initialization. Proposition~\ref{prop:layerscale-grad} explains the practical unused-branch risk. If the backbone quickly reduces the loss, this alignment signal can vanish before the branch learns a useful representation.
+
+\begin{proposition}[Effect of global norm clipping]
+\label{prop:global-clipping}
+Let the total gradient be partitioned into backbone and guard components, $g=(g_b,g_g)$. Global norm clipping with threshold $C$ updates both groups using the common multiplier
+\begin{equation}
+\alpha = \min\left(1,\frac{C}{\sqrt{\norm{g_b}_2^2+\norm{g_g}_2^2}}\right).
+\end{equation}
+If $\norm{g_b}_2\gg \norm{g_g}_2$ and $\norm{g_b}_2>C$, then the guard update is approximately $C g_g/\norm{g_b}_2$, even when $g_g$ is already small. Per-group clipping replaces this multiplier by $\alpha_g=\min(1,C_g/\norm{g_g}_2)$ for the guard group and removes the direct dependence on the backbone norm.
+\end{proposition}
+
+\begin{proof}
+The global clipping formula follows from the definition of norm clipping. The approximation follows by neglecting $\norm{g_g}_2^2$ in the denominator when the backbone norm dominates. Per-group clipping applies the same operation to each partition separately.
+\end{proof}
+
+The remedy is a curriculum and measurement protocol rather than an optimizer myth:
+\begin{enumerate}
+    \item train or pretrain the branch on auxiliary retrieval/local-pattern objectives;
+    \item briefly freeze or slow the backbone so the branch receives meaningful gradients;
+    \item use per-group learning rates and per-group clipping;
+    \item anneal $\lambda$ from a safe value to a useful value;
+    \item measure branch usage by causal-drop tests and gradient norms.
+\end{enumerate}
+
+\end{document}
+\typeout{get arXiv to do 4 passes: Label(s) may have changed. Rerun}

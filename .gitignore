@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Environments
+.venv/
+.venv-*/
+venv/
+env/
+
+# Local agent/runtime state
+.omc/
+.omx/
+AGENTS.md
+CLAUDE.md
+
+# OS/editor noise
+.DS_Store
+.idea/
+.vscode/
+
+# Generated experiment artifacts
+experiments/results/
+experiments/logs/
+analysis/figures/
+analysis/figures_v2/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Temporary extraction/build artifacts
+tmp/
+docs/tmp/
+*.aux
+*.bbl
+*.blg
+*.fls
+*.fdb_latexmk
+*.log
+*.out
+*.synctex.gz
+
+# Mirrored papers are tracked by manifest/BibTeX, not committed wholesale.
+*.pdf
+*.tar
+*.diff

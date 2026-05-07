@@ -1,0 +1,53 @@
+# Dense RetNet + Block AttnRes + Hashed Engram Baseline
+
+experiment:
+  name: retnet_engram_baseline
+  description: "Dense RetNet with Kimi-style Block AttnRes and deterministic hashed Engram"
+  seed: 42
+
+model:
+  vocab_size: 50257
+  d_model: 512
+  n_heads: 8
+  n_layers: 12
+  d_ff: 2048
+  max_seq_len: 8192
+  dropout: 0.1
+  engram_layers: [2, 6]
+  engram_num_slots: 1048576
+  engram_max_ngram: 3
+  engram_hash_heads: 8
+  attnres_every: 4
+  attnres_max_sources: 8
+  attnres_distance_penalty: 0.0
+  branch_init_scale: 1.0e-4
+  milestone_token_ids: []
+  milestone_ttl: 256
+  milestone_gamma: 0.999
+
+training:
+  batch_size: 32
+  learning_rate: 3.0e-4
+  weight_decay: 0.01
+  warmup_steps: 1000
+  max_steps: 100000
+  gradient_clip: 1.0
+  fp16: true
+
+data:
+  dataset: "wikitext-103"
+  seq_len: 2048
+  num_workers: 4
+
+logging:
+  log_interval: 100
+  eval_interval: 1000
+  save_interval: 5000
+  wandb_project: "retnet-engram"
+  wandb_entity: null
+
+instrumentation:
+  log_branch_norms: true
+  log_engram_gate_values: true
+  log_attnres_entropy: true
+  module_drop_ablation: true
