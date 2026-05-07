@@ -8,80 +8,92 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](pyproject.toml)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.1%2B-ee4c2c.svg)](requirements.txt)
 
-**A proof-aligned PyTorch scaffold for budgeted long-context memory.**
+**A proof-aligned PyTorch research scaffold for budgeted long-context memory.**
+
+RetNet recurrence + Block Attention Residuals + hashed Engram lookup +
+milestone snapshots.
 
 </div>
 
-Reference PyTorch code and proof notes for a Dense-first long-context language
-modeling research scaffold that combines:
+## What This Is
 
-- RetNet-style recurrent retention for compact sequence mixing.
-- Block Attention Residuals for depth-wise reuse of intermediate states.
-- Hashed Engram lookup for deterministic N-gram residual memory.
-- Optional milestone-triggered gates and bounded snapshot readout for selected
-  token-time facts.
+Engram Retention is an early-stage research codebase for studying whether small,
+auditable auxiliary-memory paths can improve sparse long-context recall without
+requiring a full KV cache over every previous token.
 
-The current claim is deliberately bounded: this repository studies auxiliary
-memory paths that may improve sparse long-context recall under explicit budget
-constraints. It does not claim a universal replacement for full KV-cache
-attention.
+The project combines implementation, tests, synthetic diagnostics, proof notes,
+and citation metadata in one repository. The goal is not just to propose an
+architecture, but to keep each claim close to code that can be run, ablated, and
+falsified.
 
-## Status
+## What This Is Not
 
-This is an early research codebase. The implementation is intended for
-architecture experiments, synthetic diagnostics, and proof-aligned ablations.
-Interfaces may change while the core assumptions are refined.
+This repository does **not** claim a universal replacement for Transformer
+attention or general-purpose LLM memory. The active claim is conditional and
+bounded:
 
-## Architecture
+- RetNet-style recurrence handles compact streaming sequence mixing.
+- Block Attention Residuals reuse depth-wise intermediate states.
+- Hashed Engram lookup injects deterministic N-gram memory as a residual branch.
+- Milestone gates and snapshots preserve a small selected set of token-time
+  facts under explicit budgets.
 
-Engram Retention is organized as a small language-modeling stack plus a proof
-trail. The implementation keeps four mechanisms separate so each one can be
-ablated and audited:
+## Architecture At A Glance
 
 ```text
-input tokens
+input token ids
     |
     v
-token + position embeddings
+token embedding + position embedding
     |
     v
 Dense RetNet-Engram layers
     |
     |-- RetentionLayer
-    |     compact recurrent/parallel sequence mixing with fixed per-head decay
+    |     parallel/recurrent sequence mixing with fixed per-head decay
     |
     |-- Dense FFN
-    |     phase-1 channel mixing baseline; MoE remains a future extension
+    |     phase-1 channel-mixing baseline; MoE is deferred
     |
     |-- HashedNgramEngram
-    |     deterministic N-gram lookup injected as a gated residual branch
+    |     deterministic N-gram lookup with gated residual injection
     |
     |-- BlockAttentionResidual
-    |     depth-axis reuse over earlier layer/block states
+    |     depth-axis readout over earlier block/layer states
     |
-    |-- MilestoneRetentionGate + MilestoneSnapshotReadout
-    |     optional selected-token preservation and bounded snapshot readout
+    |-- MilestoneRetentionGate
+    |     optional selected-token decay protection
+    |
+    |-- MilestoneSnapshotReadout
+    |     bounded snapshot cache plus readout branch
     |
     v
-RMSNorm + tied output projection
+RMSNorm + output projection
     |
     v
-next-token logits and diagnostic metrics
+next-token logits + diagnostic metrics
 ```
 
-The research stack around the model is:
+## Repository Map
 
-```text
-src/            implementation surface
-tests/          behavior locks for layers, model wiring, and training smoke paths
-experiments/    synthetic tasks, ablations, and reproducibility configs
-analysis/       plotting scripts for curated figures
-docs/           methodology, proof trail, assumption audits, and progress notes
-papers/         human-written notes over local paper readings
-references/     BibTeX and paper manifest, without committing mirrored PDFs
-```
+| Path | Role |
+|---|---|
+| [src/](src/README.md) | PyTorch implementation surface. |
+| [src/layers/](src/layers/README.md) | Retention, Engram, AttnRes, milestone gate, and snapshot primitives. |
+| [src/models/](src/models/README.md) | Full RetNet-Engram model and Transformer baseline. |
+| [src/training/](src/training/README.md) | Lightweight toy training helpers. |
+| [experiments/](experiments/README.md) | Synthetic diagnostic runner and experiment configs. |
+| [analysis/](analysis/README.md) | Plotting scripts for curated figures. |
+| [tests/](tests/README.md) | Unit and integration smoke tests. |
+| [docs/](docs/README.md) | Methodology, architecture notes, proof trail, and progress records. |
+| [docs/proofs/](docs/proofs/README.md) | Theorem drafts, assumption audits, and proof closure notes. |
+| [papers/](papers/README.md) | Human-written reading notes over the local literature corpus. |
+| [references/](references/README.md) | BibTeX and paper manifest; mirrored PDFs are not committed. |
 
-## Installation
+PDF papers, local virtual environments, generated experiment results, temporary
+extraction text, and agent runtime state are intentionally excluded from Git.
+
+## Install
 
 ```bash
 python -m venv .venv
@@ -90,35 +102,41 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 ```
 
-For a lighter environment without packaging metadata:
+For a lighter environment:
 
 ```bash
 python -m pip install -r requirements.txt
 ```
 
-## Quick Checks
+## Verify
 
 ```bash
+python -m ruff check .
+python -m black --check .
 python -m pytest
-python experiments/train_synthetic.py --task needle --variants ours,retnet,transformer --steps 5 --batch-size 4 --seq-len 32 --log-interval 5 --out-dir experiments/results/smoke
 ```
 
-## Repository Layout
+Expected baseline: all tests pass. The current public test suite covers
+retention decay, recurrent state shape, Engram determinism, Block AttnRes
+readout, milestone snapshots, full model forward/backward, and toy training
+updates.
 
-```text
-analysis/                   Figure-generation scripts and derived analysis
-docs/                       Research methodology, architecture notes, proofs, progress
-experiments/                Synthetic diagnostics and experiment configs
-papers/                     Reading notes for RetNet, Engram, and attention residuals
-references/                 BibTeX and manifest for the external paper corpus
-src/                        PyTorch implementation
-tests/                      Unit and integration smoke tests
+## Run A Synthetic Diagnostic
+
+Small smoke run:
+
+```bash
+python experiments/train_synthetic.py \
+  --task needle \
+  --variants ours,retnet,transformer \
+  --steps 5 \
+  --batch-size 4 \
+  --seq-len 32 \
+  --log-interval 5 \
+  --out-dir experiments/results/smoke
 ```
 
-PDF papers, local virtual environments, generated plots, temporary extraction
-text, and agent runtime state are intentionally excluded from Git.
-
-## Example Synthetic Run
+Snapshot readout ablation:
 
 ```bash
 python experiments/train_synthetic.py \
@@ -132,28 +150,44 @@ python experiments/train_synthetic.py \
   --out-dir experiments/results/needle_snapshot_eval
 ```
 
-The runner writes CSV metrics and a loss plot under the selected output
-directory. Generated results are ignored by default; commit only curated
-summaries or figures that are part of a paper artifact.
+Generated result directories are ignored by default. Commit only curated
+summaries, paper-ready figures, or documented conclusions.
 
 ## Research Trail
 
-Start with:
+Recommended reading order:
 
-- `docs/proofs/proof_plan.md`
-- `docs/proofs/pdf_assumption_audit_2026-05-03.md`
-- `docs/proofs/25-general-llm-replacement-necessary-conditions.md`
-- `docs/progress/2026-05-04-external-review-response.md`
+1. [docs/proofs/proof_plan.md](docs/proofs/proof_plan.md)
+2. [docs/proofs/pdf_assumption_audit_2026-05-03.md](docs/proofs/pdf_assumption_audit_2026-05-03.md)
+3. [docs/proofs/25-general-llm-replacement-necessary-conditions.md](docs/proofs/25-general-llm-replacement-necessary-conditions.md)
+4. [docs/progress/2026-05-04-external-review-response.md](docs/progress/2026-05-04-external-review-response.md)
+5. [docs/proofs/15-proof-closure.md](docs/proofs/15-proof-closure.md)
 
-The proof trail separates RetNet recurrence, depth-axis residual reuse,
-Engram-style lookup, and milestone snapshots so that ablations can be interpreted
-without overstating the architecture's scope.
+The proof trail deliberately separates:
+
+- RetNet recurrence from exact token-time recall.
+- Depth-axis Block AttnRes from token-time memory.
+- Engram lookup from final-layer logit bias.
+- Dense phase-1 evidence from future MoE capacity extensions.
 
 ## Citation
 
-If this repository helps your work, cite it through `CITATION.cff` or the
-Zenodo DOI: `10.5281/zenodo.20041183`.
+If this repository helps your work, cite the Zenodo DOI:
+
+```bibtex
+@software{xie_2026_engram_retention,
+  author = {Xie, Xingyu},
+  title = {Engram Retention},
+  year = {2026},
+  doi = {10.5281/zenodo.20041183},
+  url = {https://github.com/XXY-CH/engram-retention},
+  license = {CC-BY-4.0}
+}
+```
+
+The same metadata is available in [CITATION.cff](CITATION.cff).
 
 ## License
 
-Creative Commons Attribution 4.0 International (`CC-BY-4.0`). See `LICENSE`.
+Creative Commons Attribution 4.0 International (`CC-BY-4.0`). See
+[LICENSE](LICENSE).
