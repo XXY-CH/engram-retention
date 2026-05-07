@@ -1,4 +1,4 @@
-# RetNet Engram Research
+# Engram Retention
 
 Reference PyTorch code and proof notes for a Dense-first long-context language
 modeling research scaffold that combines:

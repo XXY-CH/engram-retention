@@ -16,7 +16,7 @@ As of 2026-05-07, the form asks for:
 
 ## Suggested Repository URL
 
-`https://github.com/XXY-CH/retnet-engram`
+`https://github.com/XXY-CH/engram-retention`
 
 ## Suggested Role
 
@@ -24,7 +24,7 @@ Primary maintainer.
 
 ## Why This Repository Qualifies
 
-RetNet Engram Research is an open PyTorch implementation and proof trail for
+Engram Retention is an open PyTorch implementation and proof trail for
 budgeted long-context memory: RetNet recurrence, Block Attention Residuals,
 hashed Engram lookup, and milestone snapshots. It can help researchers reproduce
 ablation-driven alternatives to KV-cache-heavy long-context modeling.

@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for your interest in improving RetNet Engram Research.
+Thanks for your interest in improving Engram Retention.
 
 This repository is research-first, so contributions should keep code changes
 small, reproducible, and tied to an explicit experiment or proof claim.

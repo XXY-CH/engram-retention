@@ -43,7 +43,7 @@ logging:
   log_interval: 100
   eval_interval: 1000
   save_interval: 5000
-  wandb_project: "retnet-engram"
+  wandb_project: "engram-retention"
   wandb_entity: null
 
 instrumentation:

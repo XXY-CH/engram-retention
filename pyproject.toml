@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "retnet-engram-research"
+name = "engram-retention-research"
 version = "0.1.0"
 description = "PyTorch research scaffold for RetNet, Block Attention Residuals, and hashed Engram memory."
 readme = "README.md"
@@ -45,8 +45,8 @@ notebook = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/XXY-CH/retnet-engram"
-Repository = "https://github.com/XXY-CH/retnet-engram"
+Homepage = "https://github.com/XXY-CH/engram-retention"
+Repository = "https://github.com/XXY-CH/engram-retention"
 
 [tool.setuptools.packages.find]
 include = ["src*"]
