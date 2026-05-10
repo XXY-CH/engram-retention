@@ -78,4 +78,4 @@ class MilestoneSnapshotReadout(nn.Module):
         weights = torch.softmax(scores, dim=-1)
         weights = self.dropout(weights)
         readout = torch.einsum("bsm,bmd->bsd", weights, v)
-        return self.residual_scale * self.out_proj(readout), weights
+        return self.residual_scale.abs() * self.out_proj(readout), weights

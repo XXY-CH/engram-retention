@@ -79,4 +79,4 @@ class BlockAttentionResidual(nn.Module):
         weights = torch.softmax(scores, dim=-1)
         weights = self.dropout(weights)
         readout = torch.einsum("bsm,bsmd->bsd", weights, values)
-        return self.residual_scale * self.out_proj(readout), weights
+        return self.residual_scale.abs() * self.out_proj(readout), weights

@@ -98,5 +98,5 @@ class HashedNgramEngram(nn.Module):
         norm_memory = self.memory_norm(memory)
         gate = torch.sigmoid(self.gate_proj(torch.cat([norm_hidden, norm_memory], dim=-1)))
         value = self.value_proj(norm_memory)
-        residual = self.residual_scale * self.dropout(gate * value)
+        residual = self.residual_scale.abs() * self.dropout(gate * value)
         return residual, gate
