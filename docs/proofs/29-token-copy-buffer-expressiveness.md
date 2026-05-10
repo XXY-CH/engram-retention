@@ -116,5 +116,6 @@ filler tokens) into a simple positional lookup.
 | seq_len | steps | eval_em |
 |---------|-------|---------|
 | 512 | 400 | **1.000** |
+| 1024 | 400 | **1.000** |
 
 Without TokenCopyBuffer, eval_em = 0.000-0.016 at all lengths.
