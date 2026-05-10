@@ -37,6 +37,9 @@ class MilestoneSnapshotReadout(nn.Module):
         milestone_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor] | None:
         """Collect up to max_snapshots hidden vectors per batch item."""
+        if self.max_snapshots <= 0:
+            return None
+
         batch, _, d_model = hidden.shape
         device = hidden.device
         snapshots = hidden.new_zeros(batch, self.max_snapshots, d_model)

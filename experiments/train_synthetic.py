@@ -338,6 +338,76 @@ def build_model(args: argparse.Namespace, variant: str, vocab_size: int):
     return model
 
 
+def build_optimizer(args: argparse.Namespace, model: torch.nn.Module) -> torch.optim.Optimizer:
+    """Build either a plain AdamW optimizer or branch-aware parameter groups."""
+    if not args.use_branch_optimizer or not isinstance(model, RetNetEngramModel):
+        return torch.optim.AdamW(
+            model.parameters(),
+            lr=args.learning_rate,
+            weight_decay=args.weight_decay,
+        )
+
+    base_params: list[torch.nn.Parameter] = []
+    guard_params: list[torch.nn.Parameter] = []
+    cache_params: list[torch.nn.Parameter] = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if name.startswith("snapshot_readout"):
+            cache_params.append(param)
+        elif ".engram." in name or ".attnres." in name:
+            guard_params.append(param)
+        else:
+            base_params.append(param)
+
+    groups: list[dict[str, object]] = []
+    if base_params:
+        groups.append(
+            {
+                "params": base_params,
+                "lr": args.learning_rate,
+                "weight_decay": args.weight_decay,
+                "betas": (0.9, 0.95),
+                "name": "base",
+            }
+        )
+    if guard_params:
+        groups.append(
+            {
+                "params": guard_params,
+                "lr": args.learning_rate * args.guard_lr_mult,
+                "weight_decay": 0.0,
+                "betas": (args.guard_beta1, 0.95),
+                "name": "guard",
+            }
+        )
+    if cache_params:
+        groups.append(
+            {
+                "params": cache_params,
+                "lr": args.learning_rate * args.cache_lr_mult,
+                "weight_decay": 0.0,
+                "betas": (args.cache_beta1, 0.95),
+                "name": "cache",
+            }
+        )
+    return torch.optim.AdamW(groups)
+
+
+def clip_gradients(
+    args: argparse.Namespace, model: torch.nn.Module, optimizer: torch.optim.Optimizer
+) -> None:
+    if not args.grad_clip:
+        return
+    if args.use_branch_optimizer and args.per_group_grad_clip:
+        for group in optimizer.param_groups:
+            params = [param for param in group["params"] if param.grad is not None]
+            if params:
+                torch.nn.utils.clip_grad_norm_(params, args.grad_clip)
+        return
+    torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+
+
 @torch.no_grad()
 def evaluate_model(
     args: argparse.Namespace,
@@ -398,11 +468,7 @@ def run_variant(
     set_seed(args.seed)
     device = torch.device(args.device)
     model = build_model(args, variant, args.vocab_size).to(device)
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=args.learning_rate,
-        weight_decay=args.weight_decay,
-    )
+    optimizer = build_optimizer(args, model)
     rows: list[dict[str, float | int | str]] = []
 
     for step in range(1, args.steps + 1):
@@ -411,8 +477,7 @@ def run_variant(
         logits, metrics = model(batch.input_ids, return_metrics=True)
         loss = masked_lm_loss(logits, batch.target_ids, batch.loss_mask)
         loss.backward()
-        if args.grad_clip:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+        clip_gradients(args, model, optimizer)
         optimizer.step()
 
         if step == 1 or step % args.log_interval == 0 or step == args.steps:
@@ -499,6 +564,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--grad-clip", type=float, default=1.0)
+    parser.add_argument("--use-branch-optimizer", action="store_true")
+    parser.add_argument("--per-group-grad-clip", action="store_true")
+    parser.add_argument("--guard-lr-mult", type=float, default=5.0)
+    parser.add_argument("--cache-lr-mult", type=float, default=3.0)
+    parser.add_argument("--guard-beta1", type=float, default=0.0)
+    parser.add_argument("--cache-beta1", type=float, default=0.5)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--log-interval", type=int, default=20)

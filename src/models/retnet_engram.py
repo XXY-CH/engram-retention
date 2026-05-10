@@ -112,8 +112,10 @@ class DenseRetNetEngramLayer(nn.Module):
         retention_gate: torch.Tensor | None,
         disable_engram: bool = False,
         disable_attnres: bool = False,
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor | None]]:
+        return_diagnostics: bool = False,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor | None], dict[str, torch.Tensor]]:
         metrics: dict[str, torch.Tensor | None] = {}
+        diagnostics: dict[str, torch.Tensor] = {}
 
         u = self.retention_norm(x)
         retention_out = self.retention(u, retention_gate=retention_gate)
@@ -128,6 +130,8 @@ class DenseRetNetEngramLayer(nn.Module):
             x = x + engram_residual
             metrics[f"layer_{self.layer_idx}_engram_gate_mean"] = engram_gate.mean()
             metrics[f"layer_{self.layer_idx}_engram_scale"] = self.engram.residual_scale.detach()
+            if return_diagnostics:
+                diagnostics[f"layer_{self.layer_idx}_engram_gate"] = engram_gate.detach()
 
         if self.attnres is not None and not disable_attnres:
             attnres_residual, attn_weights = self.attnres(self.ffn_norm(x), depth_sources)
@@ -137,8 +141,10 @@ class DenseRetNetEngramLayer(nn.Module):
                 metrics[f"layer_{self.layer_idx}_attnres_entropy"] = (
                     -(attn_weights.clamp_min(1e-9).log() * attn_weights).sum(dim=-1).mean()
                 )
+                if return_diagnostics:
+                    diagnostics[f"layer_{self.layer_idx}_attnres_weights"] = attn_weights.detach()
 
-        return x, metrics
+        return x, metrics, diagnostics
 
 
 class RetNetEngramModel(nn.Module):
@@ -189,7 +195,12 @@ class RetNetEngramModel(nn.Module):
         disable_engram: bool = False,
         disable_attnres: bool = False,
         disable_snapshots: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor | None]]:
+        return_diagnostics: bool = False,
+    ) -> (
+        torch.Tensor
+        | tuple[torch.Tensor, dict[str, torch.Tensor | None]]
+        | tuple[torch.Tensor, dict[str, torch.Tensor | None], dict[str, torch.Tensor]]
+    ):
         batch, seq_len = input_ids.shape
         if seq_len > self.config.max_seq_len:
             raise ValueError(f"seq_len {seq_len} exceeds max_seq_len {self.config.max_seq_len}")
@@ -206,17 +217,20 @@ class RetNetEngramModel(nn.Module):
 
         depth_sources: list[torch.Tensor] = []
         metrics: dict[str, torch.Tensor | None] = {}
+        diagnostics: dict[str, torch.Tensor] = {}
         snapshot_cache: tuple[torch.Tensor, torch.Tensor] | None = None
         for layer in self.layers:
-            x, layer_metrics = layer(
+            x, layer_metrics, layer_diagnostics = layer(
                 x=x,
                 input_ids=input_ids,
                 depth_sources=depth_sources,
                 retention_gate=retention_gate,
                 disable_engram=disable_engram,
                 disable_attnres=disable_attnres,
+                return_diagnostics=return_diagnostics,
             )
             metrics.update(layer_metrics)
+            diagnostics.update(layer_diagnostics)
             if self.snapshot_readout is not None and not disable_snapshots:
                 collected = self.snapshot_readout.collect(x, snapshot_source_mask)
                 if collected is not None:
@@ -235,6 +249,9 @@ class RetNetEngramModel(nn.Module):
                     -(snapshot_weights.clamp_min(1e-9).log() * snapshot_weights).sum(dim=-1).mean()
                 )
                 metrics["snapshot_valid_count"] = snapshot_cache[1].sum(dim=-1).float().mean()
+                if return_diagnostics:
+                    diagnostics["snapshot_weights"] = snapshot_weights.detach()
+                    diagnostics["snapshot_valid"] = snapshot_cache[1].detach()
 
         final_hidden = self.final_norm(x)
         logits = self.output_head(final_hidden)
@@ -252,7 +269,13 @@ class RetNetEngramModel(nn.Module):
         if return_metrics:
             if retention_gate is not None:
                 metrics["milestone_gate_mean"] = retention_gate.mean()
+                if return_diagnostics:
+                    diagnostics["milestone_gate"] = retention_gate.detach()
+            if return_diagnostics:
+                return logits, metrics, diagnostics
             return logits, metrics
+        if return_diagnostics:
+            return logits, metrics, diagnostics
         return logits
 
     def _milestone_mask(self, input_ids: torch.Tensor) -> torch.Tensor:

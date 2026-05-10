@@ -1,0 +1,96 @@
+# Early-stage synthetic diagnostics used by the manuscript.
+#
+# These are intentionally small CPU-friendly settings. They are suitable for
+# checking signal paths and ablations, not for claiming SOTA long-context
+# performance.
+
+shared:
+  seed: 42
+  eval_seed: 10042
+  device: cpu
+  vocab_size: 192
+  d_model: 64
+  n_heads: 4
+  n_layers: 4
+  d_ff: 256
+  dropout: 0.0
+  learning_rate: 3.0e-4
+  weight_decay: 0.01
+  grad_clip: 1.0
+  use_branch_optimizer: true
+  per_group_grad_clip: true
+  guard_lr_mult: 5.0
+  cache_lr_mult: 3.0
+  guard_beta1: 0.0
+  cache_beta1: 0.5
+  branch_init_scale: 1.0e-4
+  engram_layer: 2
+  engram_slots: 8192
+  engram_max_ngram: 3
+  engram_hash_heads: 4
+  attnres_every: 4
+  attnres_max_sources: 8
+  milestone_token_id: 2
+  use_milestones: true
+  use_snapshots: true
+  max_snapshots: 8
+  use_snapshot_logit_bias: true
+  snapshot_logit_scale: 1.0
+
+diagnostics:
+  high_entropy_needle:
+    command: >-
+      python experiments/train_synthetic.py
+      --task needle
+      --variants ours_nosnapshot,ours_snapshot,ours_snapshot_logits,retnet
+      --seq-len 512
+      --needle-password-len 1
+      --retention-gamma 0.95
+      --steps 120
+      --batch-size 16
+      --eval-batches 4
+      --eval-split train
+      --use-milestones
+      --use-snapshots
+      --use-snapshot-logit-bias
+      --use-branch-optimizer
+      --per-group-grad-clip
+      --out-dir experiments/results/synthetic_needle_512_snapshot_ablation_eval
+  xor_final:
+    command: >-
+      python experiments/train_synthetic.py
+      --task xor_final
+      --variants ours_nosnapshot,ours_snapshot,ours_snapshot_logits,retnet,transformer
+      --seq-len 128
+      --steps 120
+      --batch-size 16
+      --eval-batches 4
+      --use-milestones
+      --use-snapshots
+      --use-snapshot-logit-bias
+      --use-branch-optimizer
+      --per-group-grad-clip
+      --out-dir experiments/results/synthetic_xor_final_snapshot_ablation_eval
+  static_alien_dictionary:
+    command: >-
+      python experiments/train_synthetic.py
+      --task alien_static
+      --variants ours_nosnapshot,ours_snapshot,ours_snapshot_logits,retnet,transformer
+      --seq-len 128
+      --steps 120
+      --batch-size 16
+      --eval-batches 4
+      --eval-split train
+      --use-milestones
+      --use-snapshots
+      --use-snapshot-logit-bias
+      --use-branch-optimizer
+      --per-group-grad-clip
+      --out-dir experiments/results/synthetic_alien_static_snapshot_ablation_eval
+
+  local_pressure_20260508:
+    result_root: experiments/results/local_pressure_20260508
+    figure_script: analysis/notebooks/generate_local_pressure_plots.py
+    notes: >-
+      CPU-friendly comparison against RetNet and Transformer using d_model=48,
+      n_layers=4, d_ff=192, batch_size=8, eval_batches=2, and 120 steps.

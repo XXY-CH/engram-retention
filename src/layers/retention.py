@@ -72,7 +72,7 @@ class RetentionLayer(nn.Module):
         v = self._split_heads(self.v_proj(x))
 
         positions = torch.arange(seq_len, device=x.device)
-        diff = positions.unsqueeze(0) - positions.unsqueeze(1)  # [s, s]
+        diff = positions.unsqueeze(1) - positions.unsqueeze(0)  # [i, j] = i - j
         causal_mask = (diff >= 0).to(dtype=x.dtype)
 
         if retention_gate is None:
