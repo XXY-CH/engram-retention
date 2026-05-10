@@ -20,6 +20,7 @@ from ..layers.engram import HashedNgramEngram
 from ..layers.milestone_gate import MilestoneRetentionGate
 from ..layers.milestone_snapshot import MilestoneSnapshotReadout
 from ..layers.retention import RetentionLayer
+from ..layers.token_copy_buffer import TokenCopyBuffer
 
 
 @dataclass
@@ -46,6 +47,7 @@ class RetNetEngramConfig:
     max_milestone_snapshots: int = 8
     use_snapshot_logit_bias: bool = False
     snapshot_logit_scale: float = 1.0
+    use_token_copy_buffer: bool = False
 
 
 class DenseRetNetEngramLayer(nn.Module):
@@ -185,6 +187,16 @@ class RetNetEngramModel(nn.Module):
             if config.use_milestone_snapshots
             else None
         )
+        self.token_copy_buffer = (
+            TokenCopyBuffer(
+                d_model=config.d_model,
+                max_snapshots=config.max_milestone_snapshots,
+                init_scale=config.branch_init_scale,
+                dropout=config.dropout,
+            )
+            if config.use_token_copy_buffer
+            else None
+        )
         self.final_norm = nn.RMSNorm(config.d_model)
         self.output_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
 
@@ -214,6 +226,14 @@ class RetNetEngramModel(nn.Module):
         )
         milestone_mask = self._milestone_mask(input_ids)
         snapshot_source_mask = self._pre_milestone_mask(milestone_mask)
+
+        token_copy_cache: tuple[torch.Tensor, torch.Tensor] | None = None
+        if self.token_copy_buffer is not None and not disable_snapshots:
+            token_emb = self.token_embedding(input_ids)
+            copy_source_mask = self._content_before_milestone_mask(milestone_mask)
+            collected = self.token_copy_buffer.collect(token_emb, copy_source_mask)
+            if collected is not None:
+                token_copy_cache = collected
 
         depth_sources: list[torch.Tensor] = []
         metrics: dict[str, torch.Tensor | None] = {}
@@ -255,6 +275,16 @@ class RetNetEngramModel(nn.Module):
 
         final_hidden = self.final_norm(x)
         logits = self.output_head(final_hidden)
+        if self.token_copy_buffer is not None and not disable_snapshots and token_copy_cache is not None:
+            copy_readout, copy_weights = self.token_copy_buffer(final_hidden, token_copy_cache)
+            copy_logits = torch.matmul(copy_readout, self.token_embedding.weight.t())
+            logits = logits + copy_logits
+            if return_metrics:
+                metrics["token_copy_scale"] = self.token_copy_buffer.residual_scale.abs().detach()
+                if copy_weights is not None:
+                    metrics["token_copy_entropy"] = (
+                        -(copy_weights.clamp_min(1e-9).log() * copy_weights).sum(dim=-1).mean()
+                    )
         if (
             self.snapshot_readout is not None
             and self.config.use_snapshot_logit_bias
@@ -291,3 +321,11 @@ class RetNetEngramModel(nn.Module):
         source_mask = torch.zeros_like(milestone_mask)
         source_mask[:, :-1] = milestone_mask[:, 1:]
         return source_mask
+
+    @staticmethod
+    def _content_before_milestone_mask(milestone_mask: torch.Tensor) -> torch.Tensor:
+        """Mark all positions before any milestone for token copy buffer."""
+        has_future = milestone_mask.flip(dims=[1]).cummax(dim=1).values.flip(dims=[1])
+        source_mask = has_future.roll(-1, dims=1)
+        source_mask[:, -1] = False
+        return source_mask & ~milestone_mask

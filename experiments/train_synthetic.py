@@ -332,6 +332,7 @@ def build_model(args: argparse.Namespace, variant: str, vocab_size: int):
         max_milestone_snapshots=args.max_snapshots,
         use_snapshot_logit_bias=uses_full_arch and uses_snapshot_logit_bias,
         snapshot_logit_scale=args.snapshot_logit_scale,
+        use_token_copy_buffer=uses_full_arch and getattr(args, "use_token_copy_buffer", False),
     )
     model = RetNetEngramModel(config)
     override_retention_gamma(model, args.retention_gamma)
@@ -597,6 +598,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-snapshots", type=int, default=8)
     parser.add_argument("--use-snapshot-logit-bias", action="store_true")
     parser.add_argument("--snapshot-logit-scale", type=float, default=1.0)
+    parser.add_argument("--use-token-copy-buffer", action="store_true")
     parser.add_argument(
         "--retention-gamma",
         type=float,
