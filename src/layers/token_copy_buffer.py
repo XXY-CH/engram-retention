@@ -22,6 +22,7 @@ class TokenCopyBuffer(nn.Module):
         self,
         d_model: int,
         max_snapshots: int = 8,
+        max_seq_len: int = 2048,
         init_scale: float = 1e-4,
         dropout: float = 0.0,
     ) -> None:
@@ -30,6 +31,7 @@ class TokenCopyBuffer(nn.Module):
         self.max_snapshots = max_snapshots
         self.query_norm = nn.RMSNorm(d_model)
         self.key_proj = nn.Linear(d_model, d_model, bias=False)
+        self.pos_embedding = nn.Embedding(max_seq_len, d_model)
         self.dropout = nn.Dropout(dropout)
         self.residual_scale = nn.Parameter(torch.tensor(float(init_scale)))
 
@@ -37,14 +39,15 @@ class TokenCopyBuffer(nn.Module):
         self,
         token_embeddings: torch.Tensor,
         source_mask: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor] | None:
-        """Collect token embeddings at source positions."""
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+        """Collect token embeddings and position IDs at source positions."""
         if self.max_snapshots <= 0:
             return None
 
-        batch, _, d_model = token_embeddings.shape
+        batch, seq_len, d_model = token_embeddings.shape
         device = token_embeddings.device
         stored = token_embeddings.new_zeros(batch, self.max_snapshots, d_model)
+        pos_ids = torch.zeros(batch, self.max_snapshots, device=device, dtype=torch.long)
         valid = torch.zeros(batch, self.max_snapshots, device=device, dtype=torch.bool)
 
         any_stored = False
@@ -55,19 +58,20 @@ class TokenCopyBuffer(nn.Module):
             positions = positions[-self.max_snapshots:]
             count = positions.numel()
             stored[batch_idx, :count] = token_embeddings[batch_idx, positions]
+            pos_ids[batch_idx, :count] = positions
             valid[batch_idx, :count] = True
             any_stored = True
 
         if not any_stored:
             return None
-        return stored, valid
+        return stored, valid, pos_ids
 
     def forward(
         self,
         hidden: torch.Tensor,
-        buffer_cache: tuple[torch.Tensor, torch.Tensor] | None,
+        buffer_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Attend over stored token embeddings.
+        """Attend over stored token embeddings with positional keys.
 
         Returns:
             Scaled residual (in embedding space) and attention weights.
@@ -75,9 +79,9 @@ class TokenCopyBuffer(nn.Module):
         if buffer_cache is None:
             return torch.zeros_like(hidden), None
 
-        stored, valid = buffer_cache
+        stored, valid, pos_ids = buffer_cache
         q = self.query_norm(hidden)
-        k = self.key_proj(stored)
+        k = self.key_proj(stored) + self.pos_embedding(pos_ids)
         scores = torch.einsum("bsd,bmd->bsm", q, k) / (self.d_model**0.5)
         scores = scores.masked_fill(~valid.unsqueeze(1), torch.finfo(scores.dtype).min)
         weights = torch.softmax(scores, dim=-1)

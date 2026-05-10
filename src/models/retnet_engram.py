@@ -191,6 +191,7 @@ class RetNetEngramModel(nn.Module):
             TokenCopyBuffer(
                 d_model=config.d_model,
                 max_snapshots=config.max_milestone_snapshots,
+                max_seq_len=config.max_seq_len,
                 init_scale=config.branch_init_scale,
                 dropout=config.dropout,
             )
@@ -227,7 +228,7 @@ class RetNetEngramModel(nn.Module):
         milestone_mask = self._milestone_mask(input_ids)
         snapshot_source_mask = self._pre_milestone_mask(milestone_mask)
 
-        token_copy_cache: tuple[torch.Tensor, torch.Tensor] | None = None
+        token_copy_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
         if self.token_copy_buffer is not None and not disable_snapshots:
             token_emb = self.token_embedding(input_ids)
             copy_source_mask = self._content_before_milestone_mask(milestone_mask)
