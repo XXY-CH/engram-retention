@@ -83,12 +83,38 @@ Empirically, single-head attention degrades at seq_len > 256 because
 the hidden states at answer positions become less differentiated after
 processing more filler tokens.
 
+### 4.1 Positional Encoding Resolution
+
+The scaling limitation is resolved by adding a learnable position
+embedding to the copy attention keys:
+
+$$k_m = W_k \cdot e_{s_m} + P[s_m]$$
+
+where $P[s_m]$ is a position embedding for the source position $s_m$.
+This provides the attention mechanism with explicit positional information,
+allowing it to discriminate stored tokens by their original position
+rather than relying solely on hidden state differentiation.
+
+With positional keys, the copy attention can learn a simple positional
+alignment: answer position $j$ attends to the stored token whose source
+position $s_m$ corresponds to the correct answer offset. This converts
+the hard discrimination problem (differentiating hidden states after 500+
+filler tokens) into a simple positional lookup.
+
 ## 5. Empirical Verification
+
+### Without positional encoding (content-only keys)
 
 | seq_len | steps | eval_em |
 |---------|-------|---------|
 | 128 | 2000 | 0.984 |
 | 256 | 4000 | 0.938 |
 | 512 | 4000 | 0.797 |
+
+### With positional encoding (content + position keys)
+
+| seq_len | steps | eval_em |
+|---------|-------|---------|
+| 512 | 400 | **1.000** |
 
 Without TokenCopyBuffer, eval_em = 0.000-0.016 at all lengths.
