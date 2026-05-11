@@ -463,6 +463,65 @@ def evaluate_model(
             model.train()
 
 
+@torch.no_grad()
+def evaluate_model_recurrent(
+    args: argparse.Namespace,
+    model: RetNetEngramModel,
+    device: torch.device,
+    step: int,
+) -> dict[str, float]:
+    """Evaluate using O(1) recurrent step-by-step inference.
+
+    Processes each token individually through forward_recurrent_step,
+    verifying that parallel-trained models work in recurrent mode.
+    """
+    if args.eval_batches <= 0:
+        return {}
+
+    py_state = random.getstate()
+    torch_state = torch.random.get_rng_state()
+    cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    was_training = model.training
+
+    try:
+        set_seed(args.eval_seed + step)
+        model.eval()
+        losses: list[float] = []
+        accuracies: list[float] = []
+        exact_matches: list[float] = []
+        for _ in range(args.eval_batches):
+            batch = make_batch(args, device, split=args.eval_split)
+            batch_size, seq_len = batch.input_ids.shape
+
+            state = model.init_recurrent_state(batch_size, device=device)
+            all_logits: list[torch.Tensor] = []
+            for t in range(seq_len):
+                step_logits, state = model.forward_recurrent_step(
+                    batch.input_ids[:, t], state
+                )
+                all_logits.append(step_logits)
+            logits = torch.stack(all_logits, dim=1)
+
+            loss = masked_lm_loss(logits, batch.target_ids, batch.loss_mask)
+            losses.append(float(loss.detach().cpu()))
+            accuracies.append(masked_accuracy(logits, batch.target_ids, batch.loss_mask))
+            exact_matches.append(
+                masked_exact_match(logits, batch.target_ids, batch.loss_mask)
+            )
+        return {
+            "recurrent_eval_loss": sum(losses) / len(losses),
+            "recurrent_eval_accuracy": sum(accuracies) / len(accuracies),
+            "recurrent_eval_exact_match": sum(exact_matches) / len(exact_matches),
+        }
+    finally:
+        random.setstate(py_state)
+        torch.random.set_rng_state(torch_state)
+        if cuda_states is not None:
+            torch.cuda.set_rng_state_all(cuda_states)
+        if was_training:
+            model.train()
+
+
 def run_variant(
     args: argparse.Namespace, variant: str, out_dir: Path
 ) -> list[dict[str, float | int | str]]:
@@ -498,6 +557,13 @@ def run_variant(
                 dropped = evaluate_model(args, model, device, step, {module_name})
                 for key, value in dropped.items():
                     row[f"eval_no_{module_name}_{key.removeprefix('eval_')}"] = value
+            if (
+                getattr(args, "eval_recurrent", False)
+                and isinstance(model, RetNetEngramModel)
+                and "eval_loss" in row
+            ):
+                recurrent = evaluate_model_recurrent(args, model, device, step)
+                row.update(recurrent)
             rows.append(row)
             print(
                 f"{variant:12s} step={step:5d} "
@@ -506,6 +572,11 @@ def run_variant(
                 + (
                     f" eval_loss={row['eval_loss']:.4f} eval_em={row['eval_exact_match']:.3f}"
                     if "eval_loss" in row
+                    else ""
+                )
+                + (
+                    f" rec_em={row['recurrent_eval_exact_match']:.3f}"
+                    if "recurrent_eval_exact_match" in row
                     else ""
                 )
             )
@@ -599,6 +670,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-snapshot-logit-bias", action="store_true")
     parser.add_argument("--snapshot-logit-scale", type=float, default=1.0)
     parser.add_argument("--use-token-copy-buffer", action="store_true")
+    parser.add_argument("--eval-recurrent", action="store_true",
+                        help="Also evaluate with O(1) recurrent step-by-step inference.")
     parser.add_argument(
         "--retention-gamma",
         type=float,
