@@ -21,6 +21,7 @@ from ..layers.milestone_gate import MilestoneRetentionGate
 from ..layers.milestone_snapshot import MilestoneSnapshotReadout
 from ..layers.retention import RetentionLayer
 from ..layers.token_copy_buffer import TokenCopyBuffer
+from .recurrent_state import RecurrentState
 
 
 @dataclass
@@ -308,6 +309,226 @@ class RetNetEngramModel(nn.Module):
         if return_diagnostics:
             return logits, metrics, diagnostics
         return logits
+
+    def forward_recurrent_step(
+        self,
+        input_id: torch.Tensor,
+        state: RecurrentState,
+    ) -> tuple[torch.Tensor, RecurrentState]:
+        """Single-step O(1) recurrent inference.
+
+        Processes one token position, updating the recurrent state.
+        Memory usage is constant regardless of total sequence length.
+
+        Args:
+            input_id: Token IDs for this step, shape [batch].
+            state: Current recurrent state.
+
+        Returns:
+            (logits [batch, vocab_size], updated RecurrentState)
+        """
+        device = input_id.device
+        batch = input_id.shape[0]
+        pos = state.position
+        cfg = self.config
+
+        # --- Embed ---
+        positions = torch.full((batch,), pos, device=device, dtype=torch.long)
+        x = self.dropout(
+            self.token_embedding(input_id) + self.position_embedding(positions)
+        ).unsqueeze(1)
+
+        # --- Milestone detection ---
+        is_milestone = torch.zeros(batch, device=device, dtype=torch.bool)
+        for tid in cfg.milestone_token_ids:
+            is_milestone |= input_id == tid
+
+        # --- Retention gate (manual TTL window, bypassing MilestoneRetentionGate) ---
+        steps_since = state.steps_since_milestone
+        if is_milestone.any():
+            steps_since = 0
+        else:
+            steps_since += 1
+
+        if cfg.milestone_token_ids and steps_since < cfg.milestone_ttl:
+            base_gamma = self.layers[0].retention.gamma.to(device=device)
+            retention_gate = torch.maximum(
+                base_gamma.unsqueeze(0).expand(batch, -1),
+                torch.full((batch, cfg.n_heads), cfg.milestone_gamma, device=device),
+            )
+        else:
+            retention_gate = None
+
+        # --- Layer processing ---
+        new_ret_states: list[torch.Tensor] = []
+        depth_sources: list[torch.Tensor] = []
+
+        for layer_idx, layer in enumerate(self.layers):
+            u = layer.retention_norm(x)
+            ret_out, new_ret = layer.retention.recurrent_retention(
+                u,
+                state=state.retention_states[layer_idx],
+                retention_gate=retention_gate,
+            )
+            new_ret_states.append(new_ret)
+
+            ffn_out = layer.ffn(layer.ffn_norm(x))
+            x = x + ret_out + ffn_out
+
+            if layer.engram is not None:
+                eng_res, _ = layer.engram(layer.ffn_norm(x), input_id.unsqueeze(1))
+                x = x + eng_res
+
+            if layer.attnres is not None and depth_sources:
+                active = depth_sources[-layer.attnres.max_sources :]
+                attnres_res, _ = layer.attnres(layer.ffn_norm(x), active)
+                x = x + attnres_res
+
+            depth_sources.append(x.detach() if not self.training else x)
+
+        # Save post-layer hidden for snapshot timing (before readouts modify x).
+        x_for_snap = x.squeeze(1)
+
+        # --- Snapshot collection: store prev_hidden when current is milestone ---
+        snap_stored = state.snap_stored
+        snap_valid = state.snap_valid
+        snap_write_idx = state.snap_write_idx
+
+        if (
+            self.snapshot_readout is not None
+            and is_milestone.any()
+            and state.prev_hidden is not None
+            and snap_stored is not None
+            and snap_write_idx < cfg.max_milestone_snapshots
+        ):
+            snap_stored = snap_stored.clone()
+            snap_valid = snap_valid.clone()
+            snap_stored[:, snap_write_idx] = state.prev_hidden
+            snap_valid[:, snap_write_idx] = is_milestone
+            snap_write_idx += 1
+
+        # --- Snapshot readout ---
+        if (
+            self.snapshot_readout is not None
+            and snap_stored is not None
+            and snap_valid is not None
+        ):
+            snap_cache = (snap_stored, snap_valid)
+            snap_residual, _ = self.snapshot_readout(self.final_norm(x), snap_cache)
+            x = x + snap_residual
+
+        # --- TokenCopyBuffer: collect non-milestone tokens, freeze at milestone ---
+        # Only active when milestones are configured (parallel mode uses a look-ahead
+        # mask that is all-zeros without milestones, making the buffer a no-op).
+        has_milestones = bool(cfg.milestone_token_ids)
+        copy_stored = state.copy_stored
+        copy_valid = state.copy_valid
+        copy_pos_ids = state.copy_pos_ids
+        copy_frozen = state.copy_frozen
+        copy_write_idx = state.copy_write_idx
+
+        if (
+            self.token_copy_buffer is not None
+            and has_milestones
+            and not copy_frozen
+            and copy_stored is not None
+            and not is_milestone.all()
+            and copy_write_idx < cfg.max_milestone_snapshots
+        ):
+            copy_stored = copy_stored.clone()
+            copy_valid = copy_valid.clone()
+            copy_pos_ids = copy_pos_ids.clone()
+            store_mask = ~is_milestone
+            token_emb = self.token_embedding(input_id)
+            copy_stored[:, copy_write_idx] = torch.where(
+                store_mask.unsqueeze(-1),
+                token_emb,
+                copy_stored[:, copy_write_idx],
+            )
+            copy_pos_ids[:, copy_write_idx] = torch.where(
+                store_mask,
+                positions,
+                copy_pos_ids[:, copy_write_idx],
+            )
+            copy_valid[:, copy_write_idx] = (
+                copy_valid[:, copy_write_idx] | store_mask
+            )
+            copy_write_idx += 1
+
+        if is_milestone.any():
+            copy_frozen = True
+
+        # --- Final norm + output ---
+        final_hidden = self.final_norm(x)
+        logits = self.output_head(final_hidden)
+
+        # --- Copy buffer readout ---
+        if (
+            self.token_copy_buffer is not None
+            and has_milestones
+            and copy_stored is not None
+            and copy_valid is not None
+            and copy_pos_ids is not None
+            and copy_valid.any()
+        ):
+            buffer_cache = (copy_stored, copy_valid, copy_pos_ids)
+            copy_readout, _ = self.token_copy_buffer(final_hidden, buffer_cache)
+            copy_logits = torch.matmul(
+                copy_readout, self.token_embedding.weight.t()
+            )
+            logits = logits + copy_logits
+
+        # --- Snapshot logit bias ---
+        if (
+            self.snapshot_readout is not None
+            and cfg.use_snapshot_logit_bias
+            and snap_stored is not None
+            and snap_valid is not None
+        ):
+            snap_cache = (snap_stored, snap_valid)
+            snap_logits, _ = self.snapshot_readout(final_hidden, snap_cache)
+            logits = logits + cfg.snapshot_logit_scale * torch.matmul(
+                snap_logits, self.token_embedding.weight.t()
+            )
+
+        # --- Build updated state ---
+        new_state = RecurrentState(
+            position=pos + 1,
+            retention_states=new_ret_states,
+            copy_stored=copy_stored,
+            copy_valid=copy_valid,
+            copy_pos_ids=copy_pos_ids,
+            copy_frozen=copy_frozen,
+            copy_write_idx=copy_write_idx,
+            snap_stored=snap_stored,
+            snap_valid=snap_valid,
+            snap_write_idx=snap_write_idx,
+            prev_hidden=(
+                x_for_snap.detach() if self.training else x_for_snap
+            ),
+            steps_since_milestone=steps_since,
+        )
+
+        return logits.squeeze(1), new_state
+
+    def init_recurrent_state(
+        self,
+        batch_size: int,
+        device: torch.device,
+    ) -> RecurrentState:
+        """Create an empty recurrent state for this model's configuration."""
+        head_dim = self.config.d_model // self.config.n_heads
+        return RecurrentState.init_empty(
+            batch_size=batch_size,
+            n_layers=self.config.n_layers,
+            n_heads=self.config.n_heads,
+            head_dim=head_dim,
+            max_snapshots=self.config.max_milestone_snapshots,
+            d_model=self.config.d_model,
+            device=device,
+            with_copy_buffer=self.token_copy_buffer is not None,
+            with_snapshots=self.snapshot_readout is not None,
+        )
 
     def _milestone_mask(self, input_ids: torch.Tensor) -> torch.Tensor:
         if not self.config.milestone_token_ids:
