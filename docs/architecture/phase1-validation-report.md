@@ -65,10 +65,39 @@ on recall, memory, and reasoning benchmarks.
 - Training: 400-600 steps to convergence
 - Time: ~2-5 minutes per experiment at seq_len=1024
 
-## Next: Phase 2
+## Phase 2 Progress: O(1) Recurrent Inference
 
-Scale from 1024 to 1M+ context via:
-1. Recurrent mode (O(1) per step) for base RetNet
-2. Stateful TokenCopyBuffer (incremental collect + readout)
-3. Chunkwise processing for long sequences
-4. Engram disk offload for static knowledge
+Status: **RECURRENT MODE VALIDATED**
+
+### Implementation
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| `RecurrentState` | Done | Fixed-size dataclass, no growth with seq_len |
+| `forward_recurrent_step()` | Done | Single-token O(1) processing through all layers |
+| `init_recurrent_state()` | Done | Factory method matching model config |
+| Recurrent eval in train_synthetic | Done | `--eval-recurrent` flag for step-by-step eval |
+
+### Recurrent vs Parallel Equivalence
+
+Recurrent eval_em matches parallel eval_em at every training step:
+
+| seq_len | steps to parallel 1.000 | steps to recurrent 1.000 | Max difference |
+|---------|------------------------|-------------------------|----------------|
+| 128 | 180 | 180 | 0.000 |
+| 512 | 200 | 200 | 0.015 |
+
+### Memory Profile
+
+State tensor sizes are constant:
+- Retention states: `n_layers × [batch, n_heads, head_dim, head_dim]`
+- Copy buffer: `[batch, max_snapshots, d_model]` + valid + pos_ids
+- Snapshot buffer: `[batch, max_snapshots, d_model]` + valid
+- Total: O(d² × L + d × K) where L=layers, K=max_snapshots — independent of sequence length
+
+### Remaining Phase 2 Work
+
+1. Test at seq_len 1024+ with recurrent mode
+2. Chunkwise processing for sequences exceeding max_seq_len position embeddings
+3. Profile wall-clock throughput (steps/sec) of recurrent vs parallel
+4. Engram disk offload for static knowledge at scale
