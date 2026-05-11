@@ -321,6 +321,7 @@ def build_model(args: argparse.Namespace, variant: str, vocab_size: int):
         engram_num_slots=args.engram_slots,
         engram_max_ngram=args.engram_max_ngram,
         engram_hash_heads=args.engram_hash_heads,
+        engram_table_device=getattr(args, "engram_table_device", None) if uses_full_arch else None,
         attnres_every=args.attnres_every if uses_full_arch else 0,
         attnres_max_sources=args.attnres_max_sources,
         attnres_distance_penalty=args.attnres_distance_penalty if uses_full_arch else 0.0,
@@ -643,7 +644,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--guard-beta1", type=float, default=0.0)
     parser.add_argument("--cache-beta1", type=float, default=0.5)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--device", default=None,
+                        help="Device (auto-detects MPS/CUDA if omitted).")
     parser.add_argument("--log-interval", type=int, default=20)
     parser.add_argument("--eval-batches", type=int, default=0)
     parser.add_argument("--eval-seed", type=int, default=10042)
@@ -658,6 +660,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--engram-slots", type=int, default=8192)
     parser.add_argument("--engram-max-ngram", type=int, default=3)
     parser.add_argument("--engram-hash-heads", type=int, default=4)
+    parser.add_argument(
+        "--engram-table-device",
+        default=None,
+        help="Optional device for Engram hash tables, e.g. cpu for host-memory offload.",
+    )
     parser.add_argument("--attnres-every", type=int, default=4)
     parser.add_argument("--attnres-max-sources", type=int, default=8)
     parser.add_argument("--attnres-distance-penalty", type=float, default=0.0)
@@ -688,6 +695,13 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.device is None:
+        if torch.backends.mps.is_available():
+            args.device = "mps"
+        elif torch.cuda.is_available():
+            args.device = "cuda"
+        else:
+            args.device = "cpu"
     if args.d_ff == 0:
         args.d_ff = args.d_model * 4
     args.eval_drop_modules = [
