@@ -30,6 +30,27 @@ def test_hashed_engram_is_deterministic_and_scaled() -> None:
     assert module.residual_scale.abs().item() <= 1e-4
 
 
+def test_hashed_engram_tables_can_stay_on_cpu_after_model_move() -> None:
+    module = HashedNgramEngram(
+        vocab_size=32,
+        d_model=16,
+        num_slots=64,
+        max_ngram=2,
+        num_hash_heads=2,
+        table_device="cpu",
+    )
+
+    module.to(torch.device("cpu"))
+    hidden = torch.randn(2, 5, 16)
+    input_ids = torch.tensor([[1, 2, 3, 4, 5], [1, 2, 7, 8, 9]])
+    residual, gate = module(hidden, input_ids)
+
+    assert module.table_devices() == {torch.device("cpu")}
+    assert module.table_memory_bytes() == 2 * 2 * 64 * 16 * 4
+    assert residual.device == hidden.device
+    assert gate.device == hidden.device
+
+
 def test_block_attnres_reads_depth_sources_with_tiny_scale() -> None:
     module = BlockAttentionResidual(d_model=16, max_sources=2, init_scale=1e-4)
     x = torch.randn(2, 5, 16)

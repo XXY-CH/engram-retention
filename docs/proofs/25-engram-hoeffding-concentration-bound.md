@@ -1,15 +1,20 @@
-# Formal Proof C4: Exponential Concentration Bound for Engram Collisions
+# Conditional Bound C4: Concentration of Signed Engram Collision Noise
 
 Created: 2026-05-04
 
-Status: Upgraded theoretical bound replacing the loose Markov bound in C1/C2. 
-Addresses the external critique regarding the looseness of the noise bounds in high-dimensional optimization.
+Status: conditional concentration note. It strengthens the Markov-style sanity
+check under idealized signed-hash assumptions, but it is not a guarantee of
+deep-network stability.
 
 ## 0. Goal
 
 The previous proofs bounded the expected squared norm of the collision noise $\eta_x$ and applied Markov's inequality to bound the tail probability. Markov yields a slow polynomial decay ($\mathcal{O}(1/\delta)$), which is insufficient to guarantee stability for billion-scale parameter training where rare extreme collisions can cause divergence.
 
-Here, we upgrade the analysis using Hoeffding's Inequality to prove that the probability of a margin-violating collision decays *exponentially* with the hash capacity.
+Here, we use scalar projections of signed collision noise to obtain an
+exponential tail bound under independence, boundedness, and uniform-hashing
+assumptions. The result is useful for margin accounting; it does not cover
+semantic collisions, trained-table correlations, or downstream optimizer
+dynamics by itself.
 
 ## 1. Problem Formulation
 
@@ -28,18 +33,54 @@ By the vector Hoeffding inequality (or sub-Gaussian concentration), the projecti
 $$ \mathbb{P}(|\langle \eta_x, u \rangle| \ge t) \le 2 \exp\left(-\frac{K^2 t^2}{2 \sum_{k=1}^K \nu_k^2}\right) $$
 where $\nu_k^2 = \sum_{x' \neq x} I_{k, x'} R^2$.
 
-## 3. Unconditional Exponential Bound
+## 3. High-Probability Collision-Count Bound
 
-Taking the expectation over the uniform hash choices $I_{k, x'}$, the expected number of collisions per head is $\frac{N-1}{M}$. By applying a Chernoff bound on the binomial sum of collisions, we can strictly bound $\sum \nu_k^2 \le \mathcal{O}(K \frac{N}{M} R^2)$ with high probability.
+Taking the expectation over the uniform hash choices $I_{k, x'}$, the expected number of collisions per head is $\frac{N-1}{M}$. By applying a Chernoff bound on the binomial sum of collisions, one obtains a high-probability bound of the form:
+
+$$
+\sum_{k=1}^{K}\nu_k^2
+\le
+C_{\mathrm{coll}}K\frac{N+\log(1/\delta_{\mathrm{coll}})}{M}R^2
+$$
+
+for an absolute constant $C_{\mathrm{coll}}$, up to the usual binomial-tail
+constant factors. This is not an unconditional deterministic bound; the
+collision-count failure probability must be added to the final tail bound.
 
 Substituting this back into the sub-Gaussian tail bound:
-$$ \mathbb{P}(\|\eta_x\|_2 \ge \sigma) \le 2 \exp\left( - \frac{C \cdot K \cdot M \cdot \sigma^2}{N R^2} \right) $$
-where $C$ is an absolute constant.
+$$
+\mathbb{P}(|\langle\eta_x,u\rangle| \ge \sigma)
+\le
+2 \exp\left(
+- \frac{C \cdot K \cdot M \cdot \sigma^2}
+{(N+\log(1/\delta_{\mathrm{coll}}))R^2}
+\right)
++ \delta_{\mathrm{coll}}
+$$
+for any fixed unit vector $u$. A norm bound requires a covering argument or a
+dimension-dependent vector concentration inequality, so it should include the
+corresponding dimension factor.
 
-## 4. Theorem: Exponential Safety Margin
+## 4. Conditional Margin Bound
 
-If the downstream dense FFN requires the perturbation to be bounded by $\mu$ (i.e., $\alpha \|\eta_x\|_2 < \mu$), the probability of failure $\delta$ is:
-$$ \delta \le 2 \exp\left( - \frac{C K M \mu^2}{\alpha^2 N R^2} \right) $$
+If a downstream margin calculation only depends on the projection of the noise
+onto a fixed unit direction $u$, and if it can tolerate projected perturbation
+at most $\mu/\alpha$, then:
+
+$$
+\mathbb{P}(|\alpha\langle\eta_x,u\rangle| \ge \mu)
+\le
+2 \exp\left(
+- \frac{C K M \mu^2}
+{\alpha^2 (N+\log(1/\delta_{\mathrm{coll}}))R^2}
+\right)
++ \delta_{\mathrm{coll}}.
+$$
 
 **Conclusion:** 
-Unlike the loose Markov bound which scales linearly with $N/M$, this theorem proves that the failure probability $\delta$ collapses **exponentially** to zero as the table size $M$ grows, or as the injection scale $\alpha$ is kept small via LayerScale. This provides absolute mathematical rigor that the Hard Engram will not poison the deep network, satisfying the strictest requirements of statistical learning theory.
+Under the idealized signed-hash assumptions, projected collision noise has an
+exponential tail in the effective hash budget $KM/N$. This is stronger than the
+earlier Markov sanity check, but it is not an absolute guarantee that Engram
+cannot perturb a deep network. Practical safety still requires bounded branch
+scale, normalization, collision diagnostics, causal-drop evaluation, and
+downstream margin measurements.

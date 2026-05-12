@@ -168,6 +168,104 @@ class RetentionLayer(nn.Module):
         else:
             raise ValueError(f"Unknown retention mode: {mode}")
 
+    def chunkwise_retention(
+        self,
+        x: torch.Tensor,
+        state: torch.Tensor | None = None,
+        retention_gate: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Chunkwise retention: parallel within chunk, recurrent across chunks.
+
+        Processes a chunk with full parallel retention internally while
+        incorporating cross-chunk context from the previous recurrent state.
+
+        Args:
+            x: Chunk input [batch, chunk_len, d_model]
+            state: Previous recurrent state [batch, n_heads, head_dim, head_dim]
+            retention_gate: Optional per-step gate [batch, chunk_len, n_heads]
+
+        Returns:
+            (output [batch, chunk_len, d_model], updated_state)
+        """
+        batch, chunk_len, _ = x.shape
+
+        q = self._split_heads(self.q_proj(x))
+        k = self._split_heads(self.k_proj(x))
+        v = self._split_heads(self.v_proj(x))
+
+        if state is None:
+            state = torch.zeros(
+                batch, self.n_heads, self.head_dim, self.head_dim, device=x.device
+            )
+
+        positions = torch.arange(chunk_len, device=x.device)
+        diff = positions.unsqueeze(1) - positions.unsqueeze(0)
+        causal_mask = (diff >= 0).to(dtype=x.dtype)
+
+        if retention_gate is None:
+            decay = self.gamma.to(device=x.device, dtype=x.dtype)
+            decay_mask = decay.unsqueeze(-1).unsqueeze(-1) ** diff.abs()
+            decay_mask = decay_mask * causal_mask
+        else:
+            gate = retention_gate.to(device=x.device, dtype=x.dtype)
+            log_gate = torch.log(gate.clamp_min(torch.finfo(x.dtype).tiny))
+            prefix = torch.cumsum(log_gate, dim=1)
+            decay_mask = torch.exp(prefix.unsqueeze(2) - prefix.unsqueeze(1))
+            decay_mask = decay_mask.permute(0, 3, 1, 2)
+            decay_mask = decay_mask * causal_mask.view(1, 1, chunk_len, chunk_len)
+
+        within_chunk = torch.einsum("bhsd,bhtd->bhst", q, k) * decay_mask
+        within_chunk = self.dropout(within_chunk)
+        within_output = torch.einsum("bhst,bhtd->bhsd", within_chunk, v)
+
+        cross_chunk = torch.einsum("bhld,bhde->bhle", q, state)
+        # Apply position-dependent decay from previous chunk boundary.
+        # In the gated case, use cumulative gate product; otherwise use gamma.
+        if retention_gate is None:
+            decay_per_head = self.gamma.to(device=x.device, dtype=x.dtype).view(1, -1, 1, 1)
+            pos_offset = torch.arange(
+                1, chunk_len + 1, device=x.device, dtype=x.dtype
+            ).view(1, 1, -1, 1)
+            cross_chunk = cross_chunk * (decay_per_head ** pos_offset)
+        else:
+            gate = retention_gate.to(device=x.device, dtype=x.dtype)
+            log_gate = torch.log(gate.clamp_min(torch.finfo(x.dtype).tiny))
+            cum_log = torch.cumsum(log_gate, dim=1)  # [batch, chunk_len, n_heads]
+            # cross_decay[b, h, i] = exp(cum_log[b, i, h]) = product(gate[0..i])
+            cross_decay = torch.exp(cum_log.permute(0, 2, 1).unsqueeze(-1))
+            cross_chunk = cross_chunk * cross_decay
+        output = within_output + cross_chunk
+        output = self._merge_heads(output)
+        output = self.out_proj(output)
+
+        if retention_gate is None:
+            gamma = self.gamma.to(device=x.device, dtype=x.dtype).view(
+                1, self.n_heads, 1, 1
+            )
+            new_state = gamma.pow(chunk_len) * state
+            for t in range(chunk_len):
+                decay_t = gamma.pow(chunk_len - 1 - t)
+                update = torch.einsum(
+                    "bhld,bhle->bhde", k[:, :, t:t + 1], v[:, :, t:t + 1]
+                )
+                new_state = new_state + decay_t * update
+        else:
+            gate = retention_gate.to(device=x.device, dtype=x.dtype)
+            log_gate = torch.log(gate.clamp_min(torch.finfo(x.dtype).tiny))
+            total_log = log_gate.sum(dim=1)
+            new_state = torch.exp(
+                total_log.unsqueeze(-1).unsqueeze(-1)
+            ) * state
+            for t in range(chunk_len):
+                remaining_log = log_gate[:, t + 1:].sum(dim=1)
+                decay_t = torch.exp(remaining_log.unsqueeze(-1).unsqueeze(-1))
+                update = torch.einsum(
+                    "bhld,bhle->bhde", k[:, :, t:t + 1], v[:, :, t:t + 1]
+                )
+                new_state = new_state + decay_t * update
+
+        return output, new_state
+
     def _split_heads(self, x: torch.Tensor) -> torch.Tensor:
         batch, seq_len, _ = x.shape
         return x.view(batch, seq_len, self.n_heads, self.head_dim).transpose(1, 2)

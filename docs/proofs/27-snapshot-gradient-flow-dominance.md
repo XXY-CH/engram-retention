@@ -1,14 +1,20 @@
-# Formal Proof S1: Gradient Flow Dominance of Snapshot-to-Logit
+# Conditional Note S1: Snapshot-to-Logit Gradient Advantage
 
 Created: 2026-05-04
 
-Status: Addresses the "Dead Weight" and "Optimization Collapse" critiques by proving that the model possesses an explicit inductive bias to activate the Snapshot readout for exact-match tasks.
+Status: conditional optimization note. It identifies a plausible gradient
+advantage for exact-copy tasks but does not guarantee automatic module
+activation.
 
 ## 0. Goal
 
 A critical engineering vulnerability identified earlier is "Lazy Learning": if the Snapshot readout is initialized with a tiny weight or bias, the model might optimize the dense backbone (FFN) instead, leaving the Snapshot module "dead". 
 
-We must prove mathematically that for an exact-match copy task (High-Entropy Needle), the gradient flow overwhelmingly favors the Snapshot-to-Logit path over the Dense FFN path, guaranteeing automatic awakening of the module.
+The useful goal is narrower: identify conditions under which the
+Snapshot-to-Logit path receives a stronger direct gradient than a dense path
+that must reconstruct a high-entropy token from a saturated recurrent state.
+This motivates branch-aware optimization; it does not remove the need for
+curriculum, learning-rate control, or causal ablations.
 
 ## 1. Network Path Definition
 
@@ -32,12 +38,19 @@ where $J_{\mathcal{F}_l}$ are the Jacobians of the dense layers. For high-entrop
 $$ \left\| \frac{\partial \mathcal{L}_T}{\partial \lambda_{snap}} \right\| = \left| \frac{\partial \mathcal{L}_T}{\partial y_{T, v^*}} \cdot y_{T, v^*}^{Snap} \right| $$
 Because $y_{T}^{Snap}$ maps *directly* to the token embedding $V_i$ via the attention score, if $V_i$ is the correct answer $v^*$, the term $y_{T, v^*}^{Snap}$ is large ($\mathcal{O}(1)$).
 
-## 3. Theorem: Inductive Bias via Gradient Dominance
+## 3. Conditional Gradient-Advantage Statement
 
 Let $t$ be the training step in continuous time (Gradient Flow). The dynamics of the parameters follow $\dot{\theta} = -\eta \nabla_\theta \mathcal{L}$.
 
-Given that the Dense path gradient is attenuated by both depth $L$ and state saturation noise, whereas the Snapshot path gradient bypasses all intermediate layers:
+If the Dense path gradient is attenuated by both depth $L$ and state saturation
+noise, while the snapshot readout has captured the correct value and produces a
+positive logit-margin direction, then the snapshot branch can have a larger
+direct gradient:
 $$ \left\| \nabla_{\lambda_{snap}} \mathcal{L} \right\| \gg \max_{l} \left\| \nabla_{W_l} \mathcal{L} \right\| $$
 
 **Conclusion:**
-In the initial training phase for exact-match retrieval, the trajectory of the ODE governing the weights will rapidly increase $\lambda_{snap}$ while the dense weights $W_l$ experience random walk (noise). This mathematically proves that the architecture avoids the "Dead Weight Syndrome" for exact recall tasks without requiring manual curriculum heuristics; the geometry of the loss landscape guarantees the auto-awakening of the Snapshot-to-Logit mechanism.
+For high-entropy exact-copy tasks, a captured snapshot-to-logit path supplies a
+short, interpretable gradient route. This is a conditional inductive bias, not a
+guarantee that the module will awaken automatically. The practical contract is
+to report branch scales, snapshot attention mass, module-drop deltas, and
+training settings that could suppress small residual branches.

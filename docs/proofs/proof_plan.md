@@ -173,8 +173,14 @@ independent high-entropy facts requires memory scaling with `m`.
 | `docs/proofs/23-reasoning-state-reuse-theorem.md` | Future reasoning theorem: snapshots become general reasoning aids only when they capture reusable intermediate states and preserve downstream decision margin. |
 | `docs/proofs/24-canonicalized-engram-retrieval-theorem.md` | Future knowledge theorem: Engram retrieval enhancement requires canonical key hit rate, bounded collision noise, and causal module-drop evidence. |
 | `docs/proofs/25-general-llm-replacement-necessary-conditions.md` | Replacement ladder: necessary conditions, resource accounting, and information lower bound before any general LLM replacement claim. |
+| `docs/proofs/25-engram-hoeffding-concentration-bound.md` | Conditional concentration note: projected signed Engram collision noise has an exponential tail only under idealized hash assumptions. |
+| `docs/proofs/26-moe-routing-lyapunov-stability.md` | Phase-2 risk note: small residual injection gives a local router-perturbation bound, not a global MoE stability proof. |
 | `docs/proofs/26-tight-engram-concentration-bound.md` | Tighter Engram theorem: Bernstein/net high-probability collision-noise bound under signed bounded-vector assumptions. |
 | `docs/proofs/27-gated-retention-iss-stability.md` | Tighter gate theorem: input-to-state stability conditions that prevent milestone pass-through from saturating recurrent state. |
+| `docs/proofs/27-snapshot-gradient-flow-dominance.md` | Conditional optimization note: snapshot-to-logit may have a gradient advantage when capture and margin conditions hold. |
+| `docs/proofs/28-residual-scale-nonnegativity-corollary.md` | Engineering corollary: `abs()` prevents scalar sign reversal but does not prove branch alignment or margin. |
+| `docs/proofs/29-token-copy-buffer-expressiveness.md` | Conditional exact-copy logit theorem: TokenCopyBuffer succeeds only under capture, attention, embedding-margin, and base-logit-margin conditions. |
+| `docs/proofs/proof_rigor_audit_2026-05-11.md` | Corrective audit that downgrades over-strong proof claims and records reviewer rules for future theorem drafts. |
 | future `MoE reintegration proof` | Phase-2 capacity theorem: sparse experts may be reintroduced after Dense memory paths are stable; must prove routing robustness under Engram/AttnRes/Snapshot perturbations. |
 | `docs/proofs/three_part_original_paper_audit_2026-05-03.md` | Original-paper audit for RetNet, Engram, and sparse attention residual; identifies which claims are directly supported and which are project extensions. |
 | `docs/proofs/engram_gemini_alignment_audit_2026-05-03.md` | Audit of Gemini Engram claims against the downloaded Engram paper and current project direction. |

@@ -9,6 +9,7 @@ Start with:
 
 - `proof_plan.md`
 - `pdf_assumption_audit_2026-05-03.md`
+- `proof_rigor_audit_2026-05-11.md`
 - `25-general-llm-replacement-necessary-conditions.md`
 - `15-proof-closure.md`
 

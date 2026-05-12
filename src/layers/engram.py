@@ -2,6 +2,11 @@
 
 Engram here is static conditional memory: deterministic N-gram hashes retrieve
 embedding rows, then a context-aware gate injects a tiny residual branch.
+
+The embedding tables can optionally live on a separate device (usually CPU).
+That models the Engram paper's host-memory/offload direction: keep large static
+tables out of accelerator memory, move only the retrieved memory activations
+back to the residual stream device.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ class HashedNgramEngram(nn.Module):
         init_scale: float = 1e-4,
         gate_bias: float = -3.0,
         dropout: float = 0.0,
+        table_device: str | torch.device | None = None,
     ) -> None:
         super().__init__()
         self.vocab_size = vocab_size
@@ -30,12 +36,14 @@ class HashedNgramEngram(nn.Module):
         self.num_slots = num_slots
         self.max_ngram = max_ngram
         self.num_hash_heads = num_hash_heads
+        self.table_device = torch.device(table_device) if table_device is not None else None
 
         self.tables = nn.ModuleList(
             [nn.Embedding(num_slots, d_model) for _ in range(max_ngram * num_hash_heads)]
         )
         for table in self.tables:
             nn.init.normal_(table.weight, mean=0.0, std=d_model**-0.5)
+        self._move_tables_to_table_device()
 
         self.hidden_norm = nn.RMSNorm(d_model)
         self.memory_norm = nn.RMSNorm(d_model)
@@ -47,6 +55,35 @@ class HashedNgramEngram(nn.Module):
 
         salts = torch.arange(1, max_ngram * num_hash_heads + 1, dtype=torch.long)
         self.register_buffer("salts", salts * 0x9E3779B1, persistent=False)
+
+    @property
+    def table_parameter_count(self) -> int:
+        """Number of scalar parameters held by Engram lookup tables."""
+        return self.max_ngram * self.num_hash_heads * self.num_slots * self.d_model
+
+    def _move_tables_to_table_device(self) -> None:
+        """Keep lookup tables on the requested offload device."""
+        if self.table_device is None:
+            return
+        for table in self.tables:
+            table.to(self.table_device)
+
+    def _apply(self, fn):  # type: ignore[no-untyped-def]
+        """Apply module moves while preserving explicit table offload placement."""
+        result = super()._apply(fn)
+        self._move_tables_to_table_device()
+        return result
+
+    def table_memory_bytes(self) -> int:
+        """Return lookup-table storage in bytes for the current table dtype."""
+        if not self.tables:
+            return 0
+        element_size = self.tables[0].weight.element_size()
+        return self.table_parameter_count * element_size
+
+    def table_devices(self) -> set[torch.device]:
+        """Return devices currently holding Engram lookup tables."""
+        return {table.weight.device for table in self.tables}
 
     def _hash_suffixes(self, input_ids: torch.Tensor) -> list[torch.Tensor]:
         """Return hash indices for all n-gram orders and heads."""
@@ -91,8 +128,14 @@ class HashedNgramEngram(nn.Module):
             input_ids: Token IDs [batch, seq_len].
         """
         hashes = self._hash_suffixes(input_ids)
-        retrieved = [table(index) for table, index in zip(self.tables, hashes)]
-        memory = torch.stack(retrieved, dim=0).mean(dim=0)
+        retrieved = []
+        for table, index in zip(self.tables, hashes):
+            table_index = index.to(device=table.weight.device)
+            retrieved.append(table(table_index))
+        memory = torch.stack(retrieved, dim=0).mean(dim=0).to(
+            device=hidden.device,
+            dtype=hidden.dtype,
+        )
 
         norm_hidden = self.hidden_norm(hidden)
         norm_memory = self.memory_norm(memory)

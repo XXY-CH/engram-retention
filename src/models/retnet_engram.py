@@ -37,6 +37,7 @@ class RetNetEngramConfig:
     engram_num_slots: int = 4096
     engram_max_ngram: int = 3
     engram_hash_heads: int = 4
+    engram_table_device: str | None = None
     attnres_every: int = 4
     attnres_max_sources: int = 8
     attnres_distance_penalty: float = 0.0
@@ -49,6 +50,29 @@ class RetNetEngramConfig:
     use_snapshot_logit_bias: bool = False
     snapshot_logit_scale: float = 1.0
     use_token_copy_buffer: bool = False
+    token_copy_use_pos_keys: bool = True
+    token_copy_sinusoidal_pos: bool = False
+    position_encoding_type: str = "learned"  # "learned" or "sinusoidal"
+
+
+def sinusoidal_encoding(
+    positions: torch.Tensor,
+    d_model: int,
+) -> torch.Tensor:
+    """Functional sinusoidal position encoding, works at any position index.
+
+    Args:
+        positions: [...,] integer position indices.
+        d_model: encoding dimension (must be even).
+
+    Returns:
+        [..., d_model] position encodings.
+    """
+    half = d_model // 2
+    freq = torch.arange(half, device=positions.device, dtype=torch.float32)
+    freq = 1.0 / (10000.0 ** (freq / half))
+    angles = positions.float().unsqueeze(-1) * freq.unsqueeze(0)
+    return torch.cat([angles.sin(), angles.cos()], dim=-1)
 
 
 class DenseRetNetEngramLayer(nn.Module):
@@ -91,6 +115,7 @@ class DenseRetNetEngramLayer(nn.Module):
                 num_hash_heads=config.engram_hash_heads,
                 init_scale=config.branch_init_scale,
                 dropout=config.dropout,
+                table_device=config.engram_table_device,
             )
             if use_engram
             else None
@@ -157,7 +182,9 @@ class RetNetEngramModel(nn.Module):
         super().__init__()
         self.config = config
         self.token_embedding = nn.Embedding(config.vocab_size, config.d_model)
-        self.position_embedding = nn.Embedding(config.max_seq_len, config.d_model)
+        self.use_sinusoidal_pe = config.position_encoding_type == "sinusoidal"
+        if not self.use_sinusoidal_pe:
+            self.position_embedding = nn.Embedding(config.max_seq_len, config.d_model)
         self.dropout = nn.Dropout(config.dropout)
 
         engram_layers = set(config.engram_layers)
@@ -195,6 +222,8 @@ class RetNetEngramModel(nn.Module):
                 max_seq_len=config.max_seq_len,
                 init_scale=config.branch_init_scale,
                 dropout=config.dropout,
+                use_pos_keys=config.token_copy_use_pos_keys,
+                use_sinusoidal_pos=config.token_copy_sinusoidal_pos,
             )
             if config.use_token_copy_buffer
             else None
@@ -216,11 +245,15 @@ class RetNetEngramModel(nn.Module):
         | tuple[torch.Tensor, dict[str, torch.Tensor | None], dict[str, torch.Tensor]]
     ):
         batch, seq_len = input_ids.shape
-        if seq_len > self.config.max_seq_len:
+        if seq_len > self.config.max_seq_len and not self.use_sinusoidal_pe:
             raise ValueError(f"seq_len {seq_len} exceeds max_seq_len {self.config.max_seq_len}")
 
         positions = torch.arange(seq_len, device=input_ids.device).unsqueeze(0)
-        x = self.dropout(self.token_embedding(input_ids) + self.position_embedding(positions))
+        if self.use_sinusoidal_pe:
+            pos_enc = sinusoidal_encoding(positions, self.config.d_model)
+        else:
+            pos_enc = self.position_embedding(positions)
+        x = self.dropout(self.token_embedding(input_ids) + pos_enc)
 
         retention_gate = self.milestone_gate(
             input_ids,
@@ -310,6 +343,124 @@ class RetNetEngramModel(nn.Module):
             return logits, metrics, diagnostics
         return logits
 
+    @torch.no_grad()
+    def forward_chunked(
+        self,
+        input_ids: torch.Tensor,
+        chunk_size: int = 512,
+        disable_engram: bool = False,
+        disable_attnres: bool = False,
+        disable_snapshots: bool = False,
+    ) -> torch.Tensor:
+        """Forward pass with chunked retention for long-sequence evaluation.
+
+        Identical to forward() but processes each layer's retention in chunks
+        using chunkwise_retention, enabling evaluation beyond training length.
+        All masks, gates, and readout mechanisms use the full sequence.
+        """
+        batch, seq_len = input_ids.shape
+        device = input_ids.device
+        cfg = self.config
+
+        positions = torch.arange(seq_len, device=device).unsqueeze(0)
+        if self.use_sinusoidal_pe:
+            pos_enc = sinusoidal_encoding(positions, cfg.d_model)
+        else:
+            pos_enc = self.position_embedding(positions)
+        full_emb = self.dropout(self.token_embedding(input_ids) + pos_enc)
+
+        retention_gate = self.milestone_gate(
+            input_ids, base_gamma=self.layers[0].retention.gamma,
+        )
+        milestone_mask = self._milestone_mask(input_ids)
+        snapshot_source_mask = self._pre_milestone_mask(milestone_mask)
+
+        token_copy_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+        if self.token_copy_buffer is not None and not disable_snapshots:
+            token_emb = self.token_embedding(input_ids)
+            copy_source_mask = self._content_before_milestone_mask(milestone_mask)
+            collected = self.token_copy_buffer.collect(token_emb, copy_source_mask)
+            if collected is not None:
+                token_copy_cache = collected
+
+        ret_states: list[torch.Tensor | None] = [None] * cfg.n_layers
+        depth_sources: list[torch.Tensor] = []
+        snapshot_cache: tuple[torch.Tensor, torch.Tensor] | None = None
+        layer_input = full_emb
+
+        for layer_idx, layer in enumerate(self.layers):
+            chunk_outputs: list[torch.Tensor] = []
+
+            for chunk_start in range(0, seq_len, chunk_size):
+                chunk_end = min(chunk_start + chunk_size, seq_len)
+                x = layer_input[:, chunk_start:chunk_end]
+                chunk_ids = input_ids[:, chunk_start:chunk_end]
+
+                chunk_gate = (
+                    retention_gate[:, chunk_start:chunk_end]
+                    if retention_gate is not None
+                    else None
+                )
+
+                u = layer.retention_norm(x)
+                ret_out, new_state = layer.retention.chunkwise_retention(
+                    u, state=ret_states[layer_idx], retention_gate=chunk_gate,
+                )
+                ret_states[layer_idx] = new_state
+
+                ffn_out = layer.ffn(layer.ffn_norm(x))
+                x = x + ret_out + ffn_out
+
+                if layer.engram is not None and not disable_engram:
+                    eng_res, _ = layer.engram(layer.ffn_norm(x), chunk_ids)
+                    x = x + eng_res
+
+                if layer.attnres is not None and not disable_attnres and depth_sources:
+                    active = [
+                        src[:, chunk_start:chunk_end]
+                        for src in depth_sources[-layer.attnres.max_sources:]
+                    ]
+                    attnres_res, _ = layer.attnres(layer.ffn_norm(x), active)
+                    x = x + attnres_res
+
+                chunk_outputs.append(x)
+
+            x_full = torch.cat(chunk_outputs, dim=1)
+
+            if self.snapshot_readout is not None and not disable_snapshots:
+                collected = self.snapshot_readout.collect(x_full, snapshot_source_mask)
+                if collected is not None:
+                    snapshot_cache = collected
+
+            depth_sources.append(x_full.detach())
+            layer_input = x_full
+
+        x = x_full
+
+        if (
+            self.snapshot_readout is not None
+            and not disable_snapshots
+            and snapshot_cache is not None
+        ):
+            snapshot_residual, _ = self.snapshot_readout(
+                self.final_norm(x), snapshot_cache,
+            )
+            x = x + snapshot_residual
+
+        final_hidden = self.final_norm(x)
+        logits = self.output_head(final_hidden)
+
+        if (
+            self.token_copy_buffer is not None
+            and not disable_snapshots
+            and token_copy_cache is not None
+        ):
+            copy_readout, _ = self.token_copy_buffer(final_hidden, token_copy_cache)
+            copy_logits = torch.matmul(copy_readout, self.token_embedding.weight.t())
+            logits = logits + copy_logits
+
+        return logits
+
     def forward_recurrent_step(
         self,
         input_id: torch.Tensor,
@@ -334,8 +485,12 @@ class RetNetEngramModel(nn.Module):
 
         # --- Embed ---
         positions = torch.full((batch,), pos, device=device, dtype=torch.long)
+        if self.use_sinusoidal_pe:
+            pos_enc = sinusoidal_encoding(positions, cfg.d_model)
+        else:
+            pos_enc = self.position_embedding(positions)
         x = self.dropout(
-            self.token_embedding(input_id) + self.position_embedding(positions)
+            self.token_embedding(input_id) + pos_enc
         ).unsqueeze(1)
 
         # --- Milestone detection ---

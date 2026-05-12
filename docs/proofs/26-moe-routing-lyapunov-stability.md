@@ -1,12 +1,17 @@
-# Formal Proof M1: MoE Routing Stability under Residual Injection
+# Conditional Note M1: MoE Routing Perturbation under Residual Injection
 
 Created: 2026-05-04
 
-Status: Phase-2 expansion proof. Establishes the mathematical foundation for safely re-introducing Mixture-of-Experts (MoE) into the Dense Baseline without triggering Routing Collapse.
+Status: Phase-2 risk note. Establishes a local perturbation bound for router
+probabilities; it does not prove global MoE training stability.
 
 ## 0. Goal
 
-The third-party critique noted that removing MoE sacrifices parameter scaling. We established MoE removal as a "Phase-1 scaffold" to isolate signals. To progress to Phase-2 (Universal LLM Alternative), we must prove that injecting high-variance signals from Engram and Snapshot Readouts will not cause the MoE router to collapse (e.g., throwing all tokens to a single expert, leading to loss divergence).
+The third-party critique noted that deferring MoE sacrifices parameter scaling.
+We established MoE deferral as a Phase-1 scaffold to isolate signals. For Phase
+2, the first mathematical obligation is narrower than "prove no collapse": bound
+how much small residual injections can perturb a router at initialization and
+identify the additional training-time checks needed before any scaling claim.
 
 ## 1. Lipschitz Continuity of the MoE Router
 
@@ -28,7 +33,7 @@ From our Composition Guard (Proof 19), we initialize $|\lambda_E|, |\lambda_A| \
 By the Lipschitz property, the shift in routing probabilities caused by our architecture is bounded by:
 $$ \| p(x + \Delta x) - p(x) \|_1 \le \sqrt{E} \| p(x + \Delta x) - p(x) \|_2 \le \sqrt{E} L_{route} \|\Delta x\|_2 \le \sqrt{E} L_{route} \tau_{inject} $$
 
-## 3. Theorem: Guaranteed Load Balance Stability
+## 3. Local Router-Perturbation Bound
 
 Let $\mathcal{B}(x) = -\sum_{i=1}^E p_i(x) \log p_i(x)$ be the entropy of the routing distribution, which serves as a proxy for load balancing (higher entropy = more balanced routing). 
 
@@ -36,6 +41,14 @@ Since entropy is locally Lipschitz continuous for probability distributions boun
 $$ |\mathcal{B}(x + \Delta x) - \mathcal{B}(x)| \le C_{entropy} \sqrt{E} L_{route} \tau_{inject} $$
 
 **Conclusion:**
-By enforcing the LayerScale initialization ($\epsilon_{scale} = 10^{-4}$), the perturbation $\tau_{inject}$ approaches zero. Therefore, the routing distribution $p(x + \Delta x)$ is infinitesimally close to the unperturbed baseline routing $p(x)$. 
+With small LayerScale initialization ($\epsilon_{scale} = 10^{-4}$) and bounded
+branch outputs, the initial routing distribution is close to the unperturbed
+baseline routing distribution by the Lipschitz bound above.
 
-This mathematically guarantees that the MoE load-balancing dynamics are **perfectly preserved** at initialization. The MoE router will not collapse due to the orthogonal mechanisms. As training progresses and $\lambda$ scales slowly grow, the optimization dynamics (Lyapunov stability) allow the router weights $w_i$ to smoothly adapt, formally validating the feasibility of Phase-2 scaling.
+This does not guarantee that load-balancing dynamics are perfectly preserved,
+nor that the router cannot collapse during training. Training-time stability
+also depends on router temperature, auxiliary load-balancing loss, expert
+capacity, token dropping, gradient clipping, optimizer state, and the growth
+schedule of the injected branches. Phase-2 validation must therefore log router
+entropy, per-expert load, dropped-token rate, branch norms, and loss divergence
+under MoE-specific ablations.

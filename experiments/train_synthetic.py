@@ -334,6 +334,7 @@ def build_model(args: argparse.Namespace, variant: str, vocab_size: int):
         use_snapshot_logit_bias=uses_full_arch and uses_snapshot_logit_bias,
         snapshot_logit_scale=args.snapshot_logit_scale,
         use_token_copy_buffer=uses_full_arch and getattr(args, "use_token_copy_buffer", False),
+        position_encoding_type=getattr(args, "position_encoding", "learned"),
     )
     model = RetNetEngramModel(config)
     override_retention_gamma(model, args.retention_gamma)
@@ -679,6 +680,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-token-copy-buffer", action="store_true")
     parser.add_argument("--eval-recurrent", action="store_true",
                         help="Also evaluate with O(1) recurrent step-by-step inference.")
+    parser.add_argument("--position-encoding", choices=["learned", "sinusoidal"],
+                        default="learned",
+                        help="Position encoding type (sinusoidal has no length limit).")
     parser.add_argument(
         "--retention-gamma",
         type=float,

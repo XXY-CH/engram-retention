@@ -50,9 +50,10 @@ def make_train_namespace(args: argparse.Namespace, variant: str) -> argparse.Nam
         eval_drop_modules=[],
         out_dir="",
         engram_layer=2,
-        engram_slots=8192,
+        engram_slots=args.engram_slots,
         engram_max_ngram=3,
         engram_hash_heads=4,
+        engram_table_device=args.engram_table_device,
         attnres_every=4,
         attnres_max_sources=8,
         attnres_distance_penalty=0.0,
@@ -88,6 +89,7 @@ def probe_variant(args: argparse.Namespace, variant: str) -> dict[str, float | s
     device = torch.device(args.device)
     model = build_model(train_args, variant, train_args.vocab_size).to(device)
     batch = make_batch(train_args, device, split="train")
+    engram = next((layer.engram for layer in getattr(model, "layers", []) if layer.engram is not None), None)
 
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
@@ -116,6 +118,13 @@ def probe_variant(args: argparse.Namespace, variant: str) -> dict[str, float | s
         "ms_per_forward": elapsed * 1000 / args.iters,
         "rss_delta_mb": max(0.0, rss_after - rss_before),
         "rss_peak_mb": rss_after,
+        "engram_table_device": args.engram_table_device or "model_device",
+        "engram_table_devices_actual": ",".join(sorted(str(d) for d in engram.table_devices()))
+        if engram is not None
+        else "",
+        "engram_table_mb": engram.table_memory_bytes() / (1024 * 1024)
+        if engram is not None
+        else 0.0,
     }
     if device.type == "cuda":
         row["cuda_peak_mb"] = torch.cuda.max_memory_allocated(device) / (1024 * 1024)
@@ -129,6 +138,12 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--d-model", type=int, default=48)
     parser.add_argument("--n-layers", type=int, default=4)
+    parser.add_argument("--engram-slots", type=int, default=8192)
+    parser.add_argument(
+        "--engram-table-device",
+        default=None,
+        help="Optional Engram table device, e.g. cpu for host-memory offload.",
+    )
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--iters", type=int, default=10)
     parser.add_argument("--device", default="cpu")
