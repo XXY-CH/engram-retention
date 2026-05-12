@@ -11,10 +11,12 @@ hook.
 flowchart TB
     Input["input_ids"]
     TokEmb["token embedding + position embedding"]
+    ARC["ARC target controller\nwrite/read/fuse policy (not yet implemented)"]
     Gate["MilestoneRetentionGate\noptional protected RetNet decay"]
     CopyCollect["TokenCopyBuffer.collect\nraw token embeddings before milestone"]
 
     Input --> TokEmb
+    Input -. role/surprisal/utility .-> ARC
     Input --> Gate
     Input --> CopyCollect
 
@@ -37,6 +39,7 @@ flowchart TB
 
     Stack --> FinalNorm["final RMSNorm"]
     FinalNorm --> Head["output_head logits"]
+    FinalNorm -. query state .-> ARC
 
     FinalNorm --> CopyRead["TokenCopyBuffer readout\nattention over raw token embeddings"]
     CopyRead --> CopyLogits["embedding-matrix copy logits"]
@@ -44,6 +47,8 @@ flowchart TB
 
     FinalNorm --> SnapRead["MilestoneSnapshotReadout\noptional hidden snapshot residual/logit path"]
     SnapRead --> AddLogits
+    ARC -. future bounded read/fuse gates .-> CopyRead
+    ARC -. future bounded read/fuse gates .-> SnapRead
 
     Head --> AddLogits
     AddLogits --> Output["next-token logits"]
@@ -71,16 +76,23 @@ flowchart TB
 | MilestoneRetentionGate | Optional protected retention window after milestone tokens. | Bounds decay only under trigger and leakage assumptions. |
 | MilestoneSnapshotReadout | Optional hidden-state snapshot path. | Exact-token support only under capture/readout/margin conditions. |
 | TokenCopyBuffer | Optional raw token-embedding copy path. | Exact-copy logit path only under capture, attention, and margin conditions. |
+| ARC (target design) | Small controller for write/read/fuse decisions across bounded memory. | Not implemented; valid only under fixed caps, address-margin, fusion-margin, and anti-collapse conditions. |
 
 ## Memory Contract
 
 ```text
 per stream memory =
   RetNet recurrent state
+  + bounded ARC controller state (target)
   + bounded snapshot/copy buffers
   + bounded depth summaries
   + Engram retrieved activations
 ```
+
+ARC is the proposed unifying control surface for "when to write, what to write,
+which slot to read, and how to fuse the retrieved value." It must not attend
+over all past tokens. If its memory caps grow with context length, the resource
+claim must expose that growth instead of calling the path small-state.
 
 Large Engram tables may be placed in CPU/host memory through
 `engram_table_device="cpu"`. That reduces accelerator residency for static

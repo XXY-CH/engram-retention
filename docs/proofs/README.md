@@ -11,6 +11,7 @@ Start with:
 - `pdf_assumption_audit_2026-05-03.md`
 - `proof_rigor_audit_2026-05-11.md`
 - `25-general-llm-replacement-necessary-conditions.md`
+- `30-addressed-reasoning-controller.md`
 - `15-proof-closure.md`
 
 Then read the numbered proof files by topic. The numbering reflects research

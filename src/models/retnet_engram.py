@@ -320,6 +320,11 @@ class RetNetEngramModel(nn.Module):
                     metrics["token_copy_entropy"] = (
                         -(copy_weights.clamp_min(1e-9).log() * copy_weights).sum(dim=-1).mean()
                     )
+                    metrics["token_copy_valid_count"] = token_copy_cache[1].sum(dim=-1).float().mean()
+            if return_diagnostics and copy_weights is not None:
+                diagnostics["token_copy_weights"] = copy_weights.detach()
+                diagnostics["token_copy_valid"] = token_copy_cache[1].detach()
+                diagnostics["token_copy_pos_ids"] = token_copy_cache[2].detach()
         if (
             self.snapshot_readout is not None
             and self.config.use_snapshot_logit_bias

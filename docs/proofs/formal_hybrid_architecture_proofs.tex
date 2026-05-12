@@ -44,7 +44,7 @@
 \DeclarePairedDelimiter{\norm}{\lVert}{\rVert}
 
 \title{A Conditional Small-State Memory Architecture for Efficient Long-Context Reasoning:\\[0.25em]
-\Large RetNet Streaming, Distance-Biased Attention Residuals, and Engram Lookup}
+\Large RetNet Streaming, Addressed Reasoning Control, and Engram Lookup}
 \author{Xingyu Xie \\ \href{mailto:cachoidxx@gmail.com}{cachoidxx@gmail.com}}
 \date{May 2026 -- Early Research Draft v4}
 
@@ -53,7 +53,7 @@
 \maketitle
 
 \begin{abstract}
-Long-context language models must balance inexpensive processing of ordinary tokens with reliable preservation of the small subset of tokens that later become decision-critical. Transformer decoding preserves past token representations through a Key-Value cache whose memory grows with context length, whereas recurrent and linear sequence models reduce decoding state but do not, by compression alone, ensure precise recovery of rare or high-entropy information. This early-stage paper studies \emph{MESA} (Milestone-Engram Snapshot Attention), a conditional small-state memory architecture for that trade-off. The model uses a RetNet-style recurrent/chunkwise recurrent backbone for default sequence processing, a budgeted milestone snapshot cache for selected long-range premises, distance-biased Block Attention Residuals for depth-wise reuse of intermediate representations, and Engram-style N-gram lookup for frequent local patterns. The paper formalizes the inference budget, states snapshot retrieval as sufficient margin conditions, revises the Engram collision analysis to separate idealized concentration from short-range dependent NLP collisions, and records implementation-level guardrails in algorithmic form. The claim is deliberately conditional and preliminary: when task-relevant information is sparse, a capped $\Oh(K)$ snapshot path, an $\Oh(B)$ depth path, and approximately $\Oh(1)$ lookup probes may improve the memory--accuracy frontier relative to a purely recurrent backbone. The present draft does not claim state-of-the-art long-context performance or a universal replacement for full KV-cache attention.
+Long-context language models must balance inexpensive processing of ordinary tokens with reliable preservation of the small subset of tokens that later become decision-critical. Transformer decoding preserves past token representations through a Key-Value cache whose memory grows with context length, whereas recurrent and linear sequence models reduce decoding state but do not, by compression alone, ensure precise recovery of rare or high-entropy information. This early-stage paper studies \emph{MESA} (Milestone-Engram Snapshot Attention), a conditional small-state memory architecture for that trade-off, and introduces \emph{ARC} (Addressed Reasoning Controller) as a target control layer for selective write, sparse read, and gated fusion decisions. The model uses a RetNet-style recurrent/chunkwise recurrent backbone for default sequence processing, bounded snapshot and raw-token copy buffers for selected long-range premises, distance-biased Block Attention Residuals for depth-wise reuse of intermediate representations, and Engram-style N-gram lookup for frequent local patterns. The paper formalizes the inference budget, states memory retrieval as sufficient margin conditions, revises the Engram collision analysis to separate idealized concentration from short-range dependent NLP collisions, and records implementation-level guardrails in algorithmic form. The claim is deliberately conditional and preliminary: when task-relevant information is sparse, capped snapshot/copy paths, capped depth paths, capped controller state, and approximately $\Oh(1)$ lookup probes may improve the memory--accuracy frontier relative to a purely recurrent backbone. The present draft does not claim state-of-the-art long-context performance or a universal replacement for full KV-cache attention.
 \end{abstract}
 
 \tableofcontents
@@ -63,43 +63,44 @@ Long-context language models must balance inexpensive processing of ordinary tok
 
 Long-context modeling contains two distinct subproblems. The model must update its state over many tokens at low marginal cost, and it must also preserve selected assumptions, definitions, entities, or intermediate conclusions with enough fidelity to support later decisions. Standard attention provides direct access to past token representations through a Key-Value (KV) cache, but the decoding memory grows with the context length $N$. Retentive and other recurrent sequence models offer a compact streaming state, but their compression objective is not equivalent to exact long-range storage.
 
-This paper formulates the design problem as \emph{selective budget allocation}. The default path should be a low-cost streaming backbone. A small number of pivotal states should be copied into a bounded memory that is read directly at decoding time. Frequent local patterns should be served by static conditional memory when a deterministic lookup is sufficient. Intermediate reasoning states should be routed across depth by content-dependent residual aggregation rather than by uniform residual accumulation.
+This paper formulates the design problem as \emph{selective budget allocation}. The default path should be a low-cost streaming backbone. A small number of pivotal states should be copied into a bounded memory that is read directly at decoding time. Frequent local patterns should be served by static conditional memory when a deterministic lookup is sufficient. Intermediate reasoning states should be routed across depth by content-dependent residual aggregation rather than by uniform residual accumulation. A small controller is needed to decide when these paths are used; otherwise the architecture has memory modules but no auditable policy for addressing and fusion.
 
 The objective is a resource-rational architecture: additional memory is introduced only for information whose future utility is expected to exceed the cost of retaining it explicitly.
 
 \subsection{Design hypothesis and budget contract}
 
-Let $N$ denote the sequence length, $L$ the number of layers, $d$ the model width, $K$ the maximum number of active snapshot items, $B$ the number of AttnRes block summaries, and $H$ the number of Engram hash probes. The proposed inference contract is
+Let $N$ denote the sequence length, $L$ the number of layers, $d$ the model width, $K$ the maximum number of active snapshot or copy-buffer items, $B$ the number of AttnRes block summaries, $H$ the number of Engram hash probes, and $A$ the fixed ARC controller state/action budget. The proposed inference contract is
 \begin{equation}
 \label{eq:budget-contract}
 \text{memory per decoding stream}
-= \Oh(S_{\Ret}) + \Oh(Kd) + \Oh(Bd) + \Oh(Hd),
+= \Oh(S_{\Ret}) + \Oh(Ad) + \Oh(Kd) + \Oh(Bd) + \Oh(Hd),
 \end{equation}
-where $S_{\Ret}$ is the RetNet recurrent state size and is independent of $N$ for a fixed model configuration. If $K$, $B$, and $H$ are fixed or capped by policy, the marginal memory does not grow linearly with the context length. If $K$ is allowed to grow with $N$, the claim must be restated as $\Oh(K(N)d)$ rather than as bounded memory. This explicit distinction is central to the revised paper.
+where $S_{\Ret}$ is the RetNet recurrent state size and is independent of $N$ for a fixed model configuration. If $A$, $K$, $B$, and $H$ are fixed or capped by policy, the marginal memory does not grow linearly with the context length. If any cap is allowed to grow with $N$, the claim must be restated with that growth, for example as $\Oh(K(N)d)$ rather than as bounded memory. This explicit distinction is central to the revised paper.
 
 
 \begin{proposition}[Budgeted inference invariant]
 \label{prop:budget-invariant}
-Assume that the RetNet recurrent state size $S_{\Ret}$ is fixed by the model configuration, the snapshot policy returns at most $K_{\max}$ active items, Block AttnRes stores at most $B_{\max}$ depth summaries, and Engram performs at most $H_{\max}$ table probes per token. Then the non-backbone incremental decoding memory is
+Assume that the RetNet recurrent state size $S_{\Ret}$ is fixed by the model configuration, ARC uses at most $A_{\max}$ controller/action features, the snapshot/copy policy returns at most $K_{\max}$ active items, Block AttnRes stores at most $B_{\max}$ depth summaries, and Engram performs at most $H_{\max}$ table probes per token. Then the non-backbone incremental decoding memory is
 \begin{equation}
-\Oh(S_{\Ret})+\Oh(K_{\max}d)+\Oh(B_{\max}d)+\Oh(H_{\max}d),
+\Oh(S_{\Ret})+\Oh(A_{\max}d)+\Oh(K_{\max}d)+\Oh(B_{\max}d)+\Oh(H_{\max}d),
 \end{equation}
 and the non-backbone per-token read cost is
 \begin{equation}
-\Oh(K_{\max}d)+\Oh(B_{\max}d)+\Oh(H_{\max}d),
+\Oh(A_{\max}d)+\Oh(K_{\max}d)+\Oh(B_{\max}d)+\Oh(H_{\max}d),
 \end{equation}
-up to constant factors for heads and projections. These terms are independent of $N$ only when $K_{\max},B_{\max},H_{\max}$ are independent of $N$.
+up to constant factors for heads and projections. These terms are independent of $N$ only when $A_{\max},K_{\max},B_{\max},H_{\max}$ are independent of $N$.
 \end{proposition}
 
 \begin{proof}
-The cache invariant $|\Cache_t|\leq K_{\max}$ follows directly from the definition of the budget operator in Equation~\eqref{eq:budget-update}. Reading the cache by dot-product attention over $K_{\max}$ key-value pairs costs $\Oh(K_{\max}d)$ and stores $\Oh(K_{\max}d)$ vectors. The same counting argument gives $\Oh(B_{\max}d)$ for depth summaries and $\Oh(H_{\max}d)$ for Engram probes. The RetNet state is fixed for a fixed model. No step in this count depends on $N$ unless one of the caps is chosen as a function of $N$.
+The cache invariant $|\Cache_t|\leq K_{\max}$ follows directly from the definition of the budget operator in Equation~\eqref{eq:budget-update}. Reading the cache by dot-product attention over $K_{\max}$ key-value pairs costs $\Oh(K_{\max}d)$ and stores $\Oh(K_{\max}d)$ vectors. The same counting argument gives $\Oh(A_{\max}d)$ for bounded ARC features/actions, $\Oh(B_{\max}d)$ for depth summaries, and $\Oh(H_{\max}d)$ for Engram probes. The RetNet state is fixed for a fixed model. No step in this count depends on $N$ unless one of the caps is chosen as a function of $N$.
 \end{proof}
 
 \subsection{Contributions and claim boundaries}
 
-This draft makes four specific contributions.
+This draft makes five specific contributions.
 \begin{enumerate}
     \item \textbf{A conditional memory hierarchy.} RetNet handles default sequence streaming; snapshot readout handles rare long-range exact-recall events; AttnRes handles depth-wise reuse of intermediate representations; Engram handles frequent local pattern lookup.
+    \item \textbf{A target addressed controller.} ARC is introduced as a bounded controller for selective write, sparse read, and gated fusion. It is a proof obligation and instrumentation target, not yet an empirically validated replacement for full attention.
     \item \textbf{A budgeted snapshot mechanism.} The snapshot cache is defined with an explicit cap $K_{\max}$, an eviction policy, and a budget loss. This avoids the misleading statement that a data-dependent cache is automatically globally $\Oh(1)$.
     \item \textbf{Conditional mathematical statements.} The mathematical results are stated as lemmas and sufficient conditions rather than as unconditional guarantees. In particular, snapshot readout is useful only when capture, non-eviction, query alignment, and logit-margin conditions hold simultaneously.
     \item \textbf{An optimization account for guarded branches.} AdamW keeps first- and second-moment states per parameter. Dense-backbone momentum does not literally flow into guard parameters. Guard modules are instead hard to learn because their gradients can be sparse, small, clipped, delayed by small LayerScale values, or suppressed by shared schedules.
@@ -115,7 +116,7 @@ This manuscript should be read as a proof-aligned architecture proposal rather t
 \toprule
 Aspect & Current status \\
 \midrule
-Architecture & Implemented as a small Dense RetNet-Engram scaffold with optional Block AttnRes, milestone gates, and snapshot readout. \\
+Architecture & Implemented as a small Dense RetNet-Engram scaffold with optional Block AttnRes, milestone gates, snapshot readout, and TokenCopyBuffer diagnostics. ARC is target design, not yet implemented. \\
 Theory & Conditional lemmas and sufficient conditions; no unconditional approximation or dominance theorem. \\
 Evidence & Small synthetic diagnostics on CPU-friendly settings; no large-scale language-model pretraining result. \\
 Baselines & Transformer, RetNet, and ablated internal variants in toy settings only. \\
@@ -123,6 +124,46 @@ Claim level & Mechanism validation and failure analysis, not state-of-the-art or
 \bottomrule
 \end{tabular}
 \end{center}
+
+\subsection{ARC as a target control surface}
+
+The 5.5pro ARC note correctly identifies the missing integration point in the
+current architecture: RetNet can stream, TokenCopyBuffer and snapshots can store,
+Engram can look up, and AttnRes can reuse depth sources, but the system still
+needs an auditable policy for when to write, which bounded memory to read, and
+how to fuse the retrieved value. In this draft, ARC is therefore treated as a
+target control surface rather than as a completed theorem.
+
+Let ARC assign a memory slot score
+\begin{equation}
+a_j = q_t^\top k_j + b_{\mathrm{role}}(r_t,m_j)-c_{\mathrm{cost}}(m_j),
+\end{equation}
+where $q_t$ is the current query feature, $k_j$ is a bounded-memory key,
+$r_t$ is a role or controller state, and $m_j$ is slot metadata. A sufficient
+top-one addressing condition for the correct slot $j^\star$ is
+\begin{equation}
+a_{j^\star}\geq \max_{j\neq j^\star} a_j+\Delta_{\mathrm{addr}}.
+\end{equation}
+For softmax temperature $\tau$, the usual logit-margin argument gives enough
+mass on the correct slot when
+\begin{equation}
+\Delta_{\mathrm{addr}}\geq
+\tau\log\frac{(K_{\max}-1)(1-\epsilon)}{\epsilon}.
+\end{equation}
+This condition is the formal version of the current query-side addressing
+bottleneck. Capturing a value in a bounded memory is not enough; the downstream
+query must select it with sufficient margin and the fused value must then create
+a downstream decision margin.
+
+ARC must also be measured as a cascade:
+\begin{equation}
+\mathrm{capture}\rightarrow \mathrm{keep}\rightarrow
+\mathrm{address}\rightarrow \mathrm{fuse}\rightarrow \mathrm{decision}.
+\end{equation}
+If any link is unmeasured, claims about ARC should remain hypotheses. The first
+implementation step in the current scaffold is diagnostic rather than a full
+controller: TokenCopyBuffer now exposes copy weights, valid slots, and source
+positions so that correct-slot attention can be measured directly.
 
 \section{Architecture Overview}
 
@@ -357,11 +398,12 @@ The current implementation is intentionally small and auditable. It is not a pro
 \toprule
 File & Role \\
 \midrule
-{\small\path{src/models/retnet_engram.py}} & Dense RetNet-Engram language model, model configuration, milestone snapshot integration, and optional snapshot logit bias. \\
+{\small\path{src/models/retnet_engram.py}} & Dense RetNet-Engram language model, model configuration, milestone snapshot integration, optional snapshot logit bias, and copy-readout diagnostics. \\
 {\small\path{src/layers/retention.py}} & RetNet-style retention layer with fixed per-head decay below one. \\
 {\small\path{src/layers/engram.py}} & Deterministic hashed N-gram Engram lookup with gated residual injection. \\
 {\small\path{src/layers/attention_residual.py}} & Block Attention Residual over bounded depth sources. \\
 {\small\path{src/layers/milestone_snapshot.py}} & Bounded snapshot collection and readout. \\
+{\small\path{src/layers/token_copy_buffer.py}} & Bounded raw-token copy buffer with source-position diagnostics for ARC-style addressing tests. \\
 {\small\path{experiments/train_synthetic.py}} & Synthetic diagnostic runner for needle, XOR, and alien-dictionary tasks. \\
 {\small\path{experiments/run_ordered_pressure_tests.py}} & Reproducible ordered pressure-test launcher for module-drop, budget, context, gamma, seed, and held-out-key diagnostics. \\
 {\small\path{experiments/probe_internal_heatmaps.py}} & Trains a small model and exports internal mechanism heatmaps from actual diagnostics. \\
@@ -382,7 +424,7 @@ One implementation bug found during pressure testing was a reversed causal mask 
 
 \subsection{Reproducibility hooks}
 
-The repository includes smoke tests for the implementation contract. The current test surface checks retention contraction, recurrent state shape, deterministic Engram hashing, Block AttnRes normalization, milestone gating, snapshot collection/readout, full-model forward/backward propagation, synthetic training updates, snapshot budget truncation, snapshot logit-bias activation, and CSV metric emission by the synthetic runner. A minimal verification command is:
+The repository includes smoke tests for the implementation contract. The current test surface checks retention contraction, recurrent state shape, deterministic Engram hashing, Block AttnRes normalization, milestone gating, snapshot collection/readout, TokenCopyBuffer alignment diagnostics, full-model forward/backward propagation, synthetic training updates, snapshot budget truncation, snapshot logit-bias activation, and CSV metric emission by the synthetic runner. A minimal verification command is:
 \begin{verbatim}
 python -m pytest
 \end{verbatim}

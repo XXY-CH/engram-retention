@@ -60,10 +60,13 @@ the current theorem and implementation baseline.
 7. AttnRes extension: if distance-penalized AttnRes becomes active, prove the
    content-margin condition under the distance penalty and test old-assumption
    recall.
-8. Replacement ladder: state necessary conditions for any future general LLM
+8. ARC controller: prove the bounded controller contract for selective write,
+   sparse read, and gated fusion, with address-margin and fusion-margin
+   conditions.
+9. Replacement ladder: state necessary conditions for any future general LLM
    replacement claim, including resource-recall lower bounds and functional
    coverage.
-9. Tightening pass: replace loose collision and gate arguments with high
+10. Tightening pass: replace loose collision and gate arguments with high
    probability Engram concentration and ISS-style gated-retention stability.
 
 This order reflects the corrected axes. Depth dilution and token-time forgetting
@@ -144,6 +147,19 @@ S_R + O(B_time d) + O(N_depth d) + O(KM d) + O(C)
 It must also respect the lower bound that arbitrary exact recall of `m`
 independent high-entropy facts requires memory scaling with `m`.
 
+### G-controller Future: Addressed Reasoning Controller
+
+To unify the memory paths, a small controller must choose when to write, what to
+write, which bounded memory to read, and how to fuse the retrieved value. The
+controller is acceptable only if its state and memory caps are fixed by policy,
+so it changes constant factors rather than the sequence-length order. Its core
+proof obligations are address margin, fusion margin, anti-collapse stability,
+and telemetry for the chain:
+
+```text
+capture -> keep -> address -> fuse -> decision
+```
+
 ## Proof Artifacts
 
 | Artifact | Purpose |
@@ -180,6 +196,7 @@ independent high-entropy facts requires memory scaling with `m`.
 | `docs/proofs/27-snapshot-gradient-flow-dominance.md` | Conditional optimization note: snapshot-to-logit may have a gradient advantage when capture and margin conditions hold. |
 | `docs/proofs/28-residual-scale-nonnegativity-corollary.md` | Engineering corollary: `abs()` prevents scalar sign reversal but does not prove branch alignment or margin. |
 | `docs/proofs/29-token-copy-buffer-expressiveness.md` | Conditional exact-copy logit theorem: TokenCopyBuffer succeeds only under capture, attention, embedding-margin, and base-logit-margin conditions. |
+| `docs/proofs/30-addressed-reasoning-controller.md` | Target-design controller theorem: ARC is valid only under fixed resource caps, address-margin, fusion-margin, and anti-collapse conditions. |
 | `docs/proofs/proof_rigor_audit_2026-05-11.md` | Corrective audit that downgrades over-strong proof claims and records reviewer rules for future theorem drafts. |
 | future `MoE reintegration proof` | Phase-2 capacity theorem: sparse experts may be reintroduced after Dense memory paths are stable; must prove routing robustness under Engram/AttnRes/Snapshot perturbations. |
 | `docs/proofs/three_part_original_paper_audit_2026-05-03.md` | Original-paper audit for RetNet, Engram, and sparse attention residual; identifies which claims are directly supported and which are project extensions. |
@@ -205,6 +222,8 @@ The larger research program still needs:
 - namespace/salt design for multimodal hash keys;
 - real recurrent/chunkwise inference path validation beyond parallel training mode;
 - richer instrumentation for branch norms, readout mass, capture recall, and module-drop deltas;
+- ARC-style controller diagnostics for write/read/fusion decisions, starting
+  with TokenCopyBuffer correct-slot attention;
 - non-copy reasoning diagnostics that can expose snapshot shortcut overfitting.
 
 Therefore the current mathematical work is now partly executable, but each

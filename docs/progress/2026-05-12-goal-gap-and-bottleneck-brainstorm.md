@@ -4,6 +4,41 @@ Date: 2026-05-12
 
 Status: research direction update after the current memory-path checkpoint.
 
+## 2026-05-12 5.5pro ARC Note Review
+
+The reviewed document, `ARC 条件小状态记忆.docx`, proposes an Addressed
+Reasoning Controller with four parts:
+
+```text
+Memory Manager
+Write Gate
+Read Policy
+Reasoning Fusion
+```
+
+The useful contribution is architectural: ARC names the missing control surface
+between RetNet, TokenCopyBuffer, snapshots, Engram, and Block AttnRes.
+
+The wording needs downgrading before it enters the paper. The note says ARC can
+provide theoretical guarantees and deployment foundations, but the current
+project can only treat ARC as a conditional target design until the following
+are measured:
+
+```text
+capture -> keep -> address -> fuse -> decision
+```
+
+The first code-level debugging step is therefore not a full ARC implementation.
+It is exposing TokenCopyBuffer alignment diagnostics:
+
+```text
+token_copy_weights
+token_copy_valid
+token_copy_pos_ids
+```
+
+These diagnostics make the current query-side addressing bottleneck measurable.
+
 ## Target
 
 The long-term target is not only "long context". The target is the conjunction:
@@ -347,4 +382,3 @@ The paper should be updated with three facts:
 
 This update should make the paper more credible, not more pessimistic. A clear
 negative result tells us where the architecture must become more algorithmic.
-

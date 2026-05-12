@@ -134,6 +134,38 @@ def test_retnet_engram_model_forward_and_backward() -> None:
     assert model.token_embedding.weight.grad is not None
 
 
+def test_token_copy_buffer_reports_alignment_diagnostics() -> None:
+    config = RetNetEngramConfig(
+        vocab_size=64,
+        d_model=16,
+        n_heads=4,
+        n_layers=4,
+        d_ff=32,
+        max_seq_len=16,
+        engram_layers=(),
+        milestone_token_ids=(63,),
+        use_token_copy_buffer=True,
+        max_milestone_snapshots=4,
+    )
+    model = RetNetEngramModel(config)
+    input_ids = torch.randint(0, 63, (2, 8))
+    input_ids[:, 4] = 63
+
+    logits, metrics, diagnostics = model(
+        input_ids,
+        return_metrics=True,
+        return_diagnostics=True,
+    )
+
+    assert logits.shape == (2, 8, 64)
+    assert "token_copy_entropy" in metrics
+    assert "token_copy_valid_count" in metrics
+    assert diagnostics["token_copy_weights"].shape == (2, 8, 4)
+    assert diagnostics["token_copy_valid"].shape == (2, 4)
+    assert diagnostics["token_copy_pos_ids"].shape == (2, 4)
+    assert torch.all(diagnostics["token_copy_pos_ids"] <= 3)
+
+
 def test_synthetic_train_step_updates_model_and_reports_metrics() -> None:
     config = RetNetEngramConfig(
         vocab_size=48,
